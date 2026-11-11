@@ -6,6 +6,7 @@ import json
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TextIO
 
 from ..jobs import ProgressEvent
@@ -52,6 +53,13 @@ def human_size(nbytes: int) -> str:
 
 def percent(part: int, whole: int) -> str:
     return f"{round(part * 100 / whole)}%" if whole > 0 else "-"
+
+
+def _local_time(when: datetime) -> str:
+    """Entry times are stored in UTC; people expect their own clock in a listing."""
+    if when.tzinfo is not None:
+        when = when.astimezone()
+    return when.strftime("%Y-%m-%d %H:%M")
 
 
 def arrow(stream: TextIO) -> str:
@@ -107,7 +115,7 @@ def format_listing(entries: Sequence[ArchiveEntry], *, long: bool) -> list[str]:
             if is_file and e.compressed_size is not None and e.size > 0
             else "-"
         )
-        when = e.mtime.strftime("%Y-%m-%d %H:%M") if e.mtime else "-"
+        when = _local_time(e.mtime) if e.mtime else "-"
         flags = _TYPE_FLAG[e.type] + ("E" if e.encrypted else "-")
         rows.append((size, packed, ratio, when, flags, _entry_name(e)))
     header = ("Size", "Packed", "Ratio", "Modified", "Flags", "Name")
