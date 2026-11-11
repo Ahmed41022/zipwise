@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zipwise"
+version = "0.1.0"
+description = "A free file archiver for Windows and Linux: ZIP, 7z, TAR, RAR (read) with a safety-first extractor."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Ahmed Ragab" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Archiving :: Compression",
+]
+dependencies = [
+    "pyzipper",
+    "py7zr>=1.0,<2",
+    "zstandard",
+    "rarfile",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6"]
+dev = ["pytest", "pytest-qt", "ruff", "mypy"]
+
+[project.scripts]
+zipwise = "zipwise.cli.main:main"
+
+[project.gui-scripts]
+zipwise-gui = "zipwise.gui.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zipwise"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["zipwise"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+files = ["src/zipwise"]
+
+[[tool.mypy.overrides]]
+module = "zipwise.*"
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-ra -p no:pytest-qt"
+markers = [
+    "slow: tests that take noticeably longer than the rest",
+    "gui: tests that need PySide6 and an offscreen Qt platform",
+    "needs_symlink: tests that need permission to create symlinks",
+    "needs_unrar: tests that need an external unrar-compatible tool",
+]
