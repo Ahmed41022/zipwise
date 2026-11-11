@@ -76,10 +76,24 @@ def test_manifest_and_notes_sit_next_to_the_parts(parts: list[Path]) -> None:
     assert "t.zip.001" in notes and "طريقة فتح" in notes and "HOW TO OPEN" in notes
 
 
-def test_split_larger_than_the_archive_gives_one_part(tmp_path: Path, tree: Path) -> None:
-    report = create_archive([tree], tmp_path / "t.zip", CreateOptions(split_size=10**9))
-    assert [p.name for p in report.output_paths][0] == "t.zip.001"
-    assert len([p for p in report.output_paths if p.name.startswith("t.zip.0")]) == 1
+def test_split_larger_than_the_archive_keeps_it_whole(tmp_path: Path, tree: Path) -> None:
+    out = tmp_path / "out"
+    report = create_archive([tree], out / "t.zip", CreateOptions(split_size=10**9))
+    assert report.output_paths == (out / "t.zip",)
+    assert listing(out) == ["t.zip"]  # no parts, manifest or notes
+    assert [(i.severity, i.code) for i in report.issues] == [("info", "split-not-needed")]
+    assert report.ok and report.exit_code == 0
+    assert verify_archive(out / "t.zip").ok
+
+
+def test_split_exactly_the_archive_size_keeps_it_whole(tmp_path: Path, tree: Path) -> None:
+    whole = create_archive([tree], tmp_path / "w.zip").output_paths[0]
+    size = whole.stat().st_size
+    out = tmp_path / "out"
+    report = create_archive([tree], out / "t.zip", CreateOptions(split_size=size))
+    assert listing(out) == ["t.zip"] and report.issues[0].code == "split-not-needed"
+    bigger = create_archive([tree], out / "u.zip", CreateOptions(split_size=size - 1))
+    assert not bigger.issues and (out / "u.zip.002").is_file()
 
 
 def test_create_without_verify_can_still_split(tmp_path: Path, tree: Path) -> None:

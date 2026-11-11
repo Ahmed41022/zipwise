@@ -7,7 +7,12 @@ from typing import BinaryIO, cast
 
 from ..backends.base import ArchiveReader
 from ..detect import HEAD_SIZE, Detection, detect, sniff, sniff_stream
-from ..errors import CorruptArchive, PasswordRequired, UnsupportedFormat
+from ..errors import (
+    PASSWORD_REQUIRED_HINT,
+    CorruptArchive,
+    PasswordRequired,
+    UnsupportedFormat,
+)
 from ..jobs import JobContext
 from ..model import ArchiveEntry, EntryType
 from ..registry import get_reader, reader_accepts_source
@@ -124,8 +129,7 @@ def ensure_password(reader: ArchiveReader, entries: list[ArchiveEntry], ctx: Job
         supplied = ctx.ask_password() if ctx.ask_password is not None else None
         if not supplied:
             raise PasswordRequired(
-                "This archive is password protected",
-                hint="Provide the password with --password or in the password dialog.",
+                "This archive is password protected", hint=PASSWORD_REQUIRED_HINT
             )
         reader.password = supplied
     reader.check_password()

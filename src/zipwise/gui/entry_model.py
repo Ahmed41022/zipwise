@@ -62,8 +62,11 @@ def ratio_value(size: int | None, packed: int | None) -> float | None:
 
 
 def format_ratio(size: int | None, packed: int | None) -> str:
+    """Packed size as a percentage, blank unless packing made the data smaller."""
     ratio = ratio_value(size, packed)
-    return "" if ratio is None else f"{ratio * 100:.0f}%"
+    if ratio is None or ratio >= 1:
+        return ""
+    return f"{min(ratio * 100, 99):.0f}%"
 
 
 def format_mtime(value: datetime | None) -> str:

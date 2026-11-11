@@ -14,6 +14,7 @@ from helpers.roundtrip import assert_roundtrip
 from helpers.trees import SHAPES, Link, make_tree, random_bytes, snapshot
 from zipwise.backends.sevenz import SevenZipReader, SevenZipWriter
 from zipwise.errors import (
+    PASSWORD_REQUIRED_HINT,
     BombDetected,
     Cancelled,
     CorruptArchive,
@@ -226,6 +227,24 @@ def test_header_encrypted_archive_without_password(
         list_archive(archive)
     with pytest.raises(PasswordRequired):
         extract_archive(archive, tmp_path / "o")
+
+
+def test_password_required_hint_is_front_end_neutral(
+    encrypted_7z: Path, header_encrypted_7z: Path
+) -> None:
+    caught: list[PasswordRequired] = []
+    for call in (lambda: list_archive(header_encrypted_7z), lambda: verify_archive(encrypted_7z)):
+        with pytest.raises(PasswordRequired) as info:
+            call()
+        caught.append(info.value)
+    for exc in caught:
+        assert exc.hint == PASSWORD_REQUIRED_HINT
+        assert "--" not in (exc.hint or "") and "dialog" not in (exc.hint or "")
+
+
+def test_header_encrypted_archive_lists_with_its_password(header_encrypted_7z: Path) -> None:
+    assert list_archive(header_encrypted_7z, password=PASSWORD)
+    assert archive_info(header_encrypted_7z, password=PASSWORD).encrypted is True
 
 
 def test_header_encrypted_archive_with_wrong_password(header_encrypted_7z: Path) -> None:

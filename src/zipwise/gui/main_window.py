@@ -541,7 +541,8 @@ class MainWindow(QMainWindow):
 
         def done(result: object) -> None:
             self.status_label.setText(tr("status.created", name=dest.name))
-            if isinstance(result, OperationReport) and options.split_size is None:
+            # a split that was not needed still leaves one plain archive to open
+            if isinstance(result, OperationReport) and len(result.output_paths) == 1:
                 self.open_archive(dest)
 
         self._start_job(tr("create.progress_title"), factory, done)

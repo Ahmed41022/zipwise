@@ -55,6 +55,16 @@ def percent(part: int, whole: int) -> str:
     return f"{round(part * 100 / whole)}%" if whole > 0 else "-"
 
 
+def saving_percent(packed: int, whole: int) -> str | None:
+    """``packed`` as a percentage of ``whole``, or None when packing did not make it smaller.
+
+    Capped at 99% so a tiny saving never reads as "100%".
+    """
+    if whole <= 0 or packed < 0 or packed >= whole:
+        return None
+    return f"{min(round(packed * 100 / whole), 99)}%"
+
+
 def _local_time(when: datetime) -> str:
     """Entry times are stored in UTC; people expect their own clock in a listing."""
     if when.tzinfo is not None:
@@ -111,8 +121,8 @@ def format_listing(entries: Sequence[ArchiveEntry], *, long: bool) -> list[str]:
         size = human_size(e.size) if is_file and e.size >= 0 else "-"
         packed = human_size(e.compressed_size) if is_file and e.compressed_size is not None else "-"
         ratio = (
-            percent(e.compressed_size, e.size)
-            if is_file and e.compressed_size is not None and e.size > 0
+            saving_percent(e.compressed_size, e.size) or "-"
+            if is_file and e.compressed_size is not None
             else "-"
         )
         when = _local_time(e.mtime) if e.mtime else "-"
@@ -137,7 +147,10 @@ def listing_footer(entries: Sequence[ArchiveEntry]) -> str:
     text = f"{plural(len(entries), 'entry')}, {human_size(total)}"
     if files and all(e.compressed_size is not None for e in files):
         packed = sum(e.compressed_size or 0 for e in files)
-        text += f", {human_size(packed)} packed ({percent(packed, total)})"
+        text += f", {human_size(packed)} packed"
+        saved = saving_percent(packed, total)
+        if saved is not None:
+            text += f" ({saved})"
     return text
 
 

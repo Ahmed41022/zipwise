@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from cli_support import Run, RunFn
 
+from helpers.names import extracted_files
 from zipwise import __version__
 from zipwise.cli.commands import archive_stem
 from zipwise.cli.parser import (
     COMMAND_NAMES,
     FORMAT_SUFFIXES,
+    PASSWORD_COMMANDS,
+    PASSWORD_PROMPT,
+    build_parser,
     format_arg,
     format_from_name,
     level_arg,
@@ -27,6 +32,7 @@ from zipwise.cli.render import (
     listing_footer,
     plural,
     result_document,
+    saving_percent,
 )
 from zipwise.jobs import ProgressEvent
 from zipwise.model import ArchiveEntry, EntryType, FormatId, Issue
@@ -161,7 +167,97 @@ def test_global_options_work_before_or_after_the_command(
         assert "data/a.txt" in result.out
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["extract", "ARC", "data/a.txt", "-o", "DEST"],
+        ["extract", "ARC", "-o", "DEST", "data/a.txt"],
+        ["extract", "-o", "DEST", "ARC", "data/a.txt"],
+        ["extract", "-o", "DEST", "ARC", "--on-conflict", "overwrite", "data/a.txt"],
+        ["--json", "extract", "ARC", "-o", "DEST", "data/a.txt", "--no-progress"],
+        ["extract", "ARC", "-o", "DEST", "--json", "data/a.txt"],
+    ],
+)
+def test_entry_names_and_options_in_any_order(
+    run: RunFn, archive: Path, tmp_path: Path, argv: list[str]
+) -> None:
+    dest = tmp_path / "out"
+    swap = {"ARC": str(archive), "DEST": str(dest)}
+    result = run(*[swap.get(a, a) for a in argv])
+    assert result.code == 0, result.err
+    assert extracted_files(dest) == ["data/a.txt"]
+
+
+def test_strip_components_before_names(run: RunFn, archive: Path, tmp_path: Path) -> None:
+    dest = tmp_path / "s"
+    result = run("extract", archive, "-o", dest, "--strip-components", "1", "data/sub")
+    assert result.code == 0, result.err
+    assert extracted_files(dest) == ["sub/b.txt", "sub/c.bin"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["create", "OUT", "--level", "fast", "DATA"],
+        ["create", "--level", "fast", "OUT", "DATA"],
+        ["create", "OUT", "DATA", "--level", "fast"],
+    ],
+)
+def test_create_sources_and_options_in_any_order(
+    run: RunFn, data: Path, tmp_path: Path, argv: list[str]
+) -> None:
+    out = tmp_path / "o.zip"
+    swap = {"OUT": str(out), "DATA": str(data)}
+    assert run(*[swap.get(a, a) for a in argv]).code == 0
+    assert out.is_file()
+
+
+def test_list_and_info_take_the_archive_after_options(run: RunFn, archive: Path) -> None:
+    assert run("list", "-l", "--encoding", "utf-8", archive).code == 0
+    assert run("info", "--encoding", "utf-8", archive).code == 0
+
+
+def test_unknown_option_after_names_is_still_an_error(run: RunFn, archive: Path) -> None:
+    result = run("extract", archive, "data/a.txt", "--bogus")
+    assert result.code == 2 and "--bogus" in result.err
+
+
+def test_missing_positional_with_intermixed_options_in_json(run: RunFn) -> None:
+    result = run("create", "--level", "fast", "--json", "x.zip")
+    assert result.code == 2
+    doc = result.json()
+    assert doc["command"] == "create" and doc["error"]["code"] == "usage"
+
+
+@pytest.mark.parametrize("command", PASSWORD_COMMANDS)
+def test_password_commands_accept_both_password_flags(command: str) -> None:
+    parser = build_parser()
+    positional = ["a.zip", "src"] if command == "create" else ["a.zip"]
+    args = parser.parse_args([command, *positional, "--password-file", "pw.txt"])
+    assert args.password_file == "pw.txt"
+    bare = parser.parse_args([command, *positional, "-p"])
+    assert bare.password == PASSWORD_PROMPT
+    before = parser.parse_args([command, "--password=x", *positional])
+    assert before.password == "x" and before.archive == "a.zip"
+
+
 # -- render helpers -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("packed", "whole", "text"),
+    [(25, 100, "25%"), (0, 100, "0%"), (995, 1000, "99%"), (100, 100, None), (234, 4, None)],
+)
+def test_saving_percent(packed: int, whole: int, text: str | None) -> None:
+    assert saving_percent(packed, whole) == text
+    assert saving_percent(5, 0) is None
+
+
+def test_listing_hides_the_ratio_when_nothing_was_saved() -> None:
+    entries = [_entry("tiny.txt", size=7, compressed_size=9)]
+    row = format_listing(entries, long=True)[1]
+    assert "%" not in row and row.split()[4] == "-"
+    assert listing_footer(entries) == "1 entry, 7 B, 9 B packed"
 
 
 @pytest.mark.parametrize(

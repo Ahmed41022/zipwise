@@ -68,6 +68,10 @@ class PasswordRequired(ZipwiseError):
     exit_code = ExitCode.PASSWORD
 
 
+# Front-end neutral; the CLI and GUI each say how to supply the password.
+PASSWORD_REQUIRED_HINT = "A password is needed to open this archive."
+
+
 class WrongPassword(ZipwiseError):
     code = "wrong-password"
     exit_code = ExitCode.PASSWORD

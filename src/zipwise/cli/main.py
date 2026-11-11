@@ -29,6 +29,46 @@ def _isatty(stream: object) -> bool:
         return False
 
 
+def _is_console(fd: int) -> bool:
+    """False for a Windows character device that is not a console, such as ``NUL``.
+
+    ``isatty()`` is True for any character device on Windows, so ``< NUL`` would look like a
+    keyboard and a password prompt would wait forever. Only a console handle has a console
+    mode. Elsewhere ``isatty()`` is already accurate.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        import msvcrt
+
+        try:
+            handle = msvcrt.get_osfhandle(fd)
+        except OSError:
+            return False
+        mode = ctypes.c_uint32()
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            return bool(kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+        except (AttributeError, OSError):
+            return True  # cannot tell: trust isatty()
+    return True
+
+
+def is_terminal(stream: object) -> bool:
+    """True when ``stream`` is a real interactive terminal."""
+    if not _isatty(stream):
+        return False
+    try:
+        fd = stream.fileno()  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, OSError):
+        return True  # a stream without a descriptor that says it is a terminal
+    return _is_console(fd)
+
+
+def interactive_terminal(stdin: object, stderr: object) -> bool:
+    """Prompts are written to stderr and read from stdin, so both must be terminals."""
+    return is_terminal(stdin) and is_terminal(stderr)
+
+
 def _harden_streams(json_mode: bool) -> None:
     """Never let a console code page that lacks a character crash the output."""
     for stream in (sys.stdout, sys.stderr):
@@ -105,13 +145,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     quiet: bool = getattr(args, "quiet", False)
     use_json: bool = getattr(args, "json", False)
     no_progress: bool = getattr(args, "no_progress", False)
-    show_progress = _isatty(sys.stderr) and not (quiet or no_progress or use_json)
+    show_progress = is_terminal(sys.stderr) and not (quiet or no_progress or use_json)
     token = CancelToken()
     bar = ProgressBar(sys.stderr) if show_progress else None
     env = commands.RunEnv(
         cancel=token,
         progress=bar,
-        stdin_tty=_isatty(sys.stdin),
+        stdin_tty=interactive_terminal(sys.stdin, sys.stderr),
         quiet=quiet,
         json=use_json,
     )
@@ -119,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = commands.HANDLERS[command](args, env)
     except ZipwiseError as exc:
-        result = _error_result(command, exc)
+        result = _error_result(command, commands.with_cli_hint(command, exc))
     except KeyboardInterrupt:
         token.cancel()
         result = _error_result(command, Cancelled())

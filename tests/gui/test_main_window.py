@@ -202,6 +202,20 @@ def test_create_through_dialog_and_worker(
     assert window.archive_path == dest
 
 
+def test_create_opens_the_archive_when_a_split_was_not_needed(
+    qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
+) -> None:
+    window, rec = win
+    dest = tmp_path / "small.zip"
+    options = CreateOptions(split_size=10**9)
+    assert wait_job(qtbot, window, lambda: window.create_with([proj_tree], dest, options)) == (
+        "finished"
+    )
+    assert not rec.errors
+    assert window.archive_path == dest
+    assert not (tmp_path / "small.zip.001").exists()
+
+
 def test_create_asks_before_replacing(
     win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
 ) -> None:

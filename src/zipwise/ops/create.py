@@ -16,6 +16,16 @@ from ..smart import should_store
 from ..split import manifest_name, recipient_notes, split_file
 from ._input import progress_total
 
+# Issue code reported when a split was asked for but the archive fits in one part.
+SPLIT_NOT_NEEDED = "split-not-needed"
+
+
+def _fits_in_one_part(path: Path, part_size: int) -> bool:
+    try:
+        return os.path.getsize(path) <= part_size
+    except OSError as exc:
+        raise translate_oserror(exc, f"cannot read {path.name}") from exc
+
 
 def _verify_created(
     path: Path, expected_entries: int, options: CreateOptions, ctx: JobContext
@@ -57,7 +67,9 @@ def create_archive(
     """Archive ``sources`` (files and directories) into ``dest``.
 
     The archive is written to ``dest.partial`` and renamed only after it passed verification,
-    so an existing ``dest`` is never replaced by a broken file.
+    so an existing ``dest`` is never replaced by a broken file. With ``split_size`` the verified
+    archive is cut into numbered parts, unless it already fits in one part: then it is kept as
+    ``dest`` and the report carries an info issue with code ``split-not-needed``.
     """
     options = options or CreateOptions()
     ctx = ctx or JobContext()
@@ -131,6 +143,18 @@ def create_archive(
         if options.split_size is None:
             atomic.commit()
             outputs = [target]
+        elif _fits_in_one_part(atomic.temp, options.split_size):
+            atomic.commit()
+            outputs = [target]
+            issues.append(
+                Issue(
+                    "info",
+                    SPLIT_NOT_NEEDED,
+                    None,
+                    f"The archive fits in one part of {options.split_size} bytes, "
+                    "so it was kept whole",
+                )
+            )
         else:
             # The verified file is cut straight from ``.partial`` and then removed, so a
             # cancelled split leaves neither parts nor a half-finished archive.

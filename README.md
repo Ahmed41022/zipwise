@@ -58,6 +58,10 @@ zipwise create photos.zip Pictures notes.txt --level best
 Created photos.zip (4 entries, 15.7 KB → 3.5 KB, 23%) and verified it.
 ```
 
+The percentage is the archive size relative to the input; it is left out when the archive is not
+smaller (tiny or already-compressed files), and the same goes for the ratio in `list --long` and
+`info`.
+
 Levels are `fast`, `normal` (the default), `best`, or a number from 0 to 9. Other useful flags:
 `--no-verify`, `--no-smart-store`, `--follow-symlinks` (store what links point to instead of the
 links), `--force` (replace an existing archive; without it Zipwise refuses).
@@ -65,7 +69,9 @@ links), `--force` (replace an existing archive; without it Zipwise refuses).
 Passwords: `--password-file FILE` reads the first line of a file. `-p` / `--password` takes the
 password as a value, or asks for it on the terminal (twice) when given without one; put a bare
 `-p` after the positional arguments. ZIP uses AES-256. For 7z, `--encrypt-names` also encrypts
-the file names.
+the file names; `list` and `info` then need the password too. `extract`, `list`, `test` and
+`info` take the same `-p` / `--password` / `--password-file` flags and ask once on a terminal
+when a password is needed but not given (without a terminal they exit with code 6).
 
 ```
 zipwise create secret.7z Documents --password-file pw.txt --encrypt-names
@@ -94,6 +100,10 @@ parts.)
 Parts, the manifest and `HOW-TO-OPEN.txt` are written next to where the archive would have
 been. `list`, `test` and `extract` work on `holiday.zip.001` directly, without joining.
 
+If the finished archive already fits in one part, it is not split: you get the plain
+`holiday.zip`, no manifest and no `HOW-TO-OPEN.txt`, and the summary says so (in `--json` the
+`issues` list has an `info` entry with code `split-not-needed`).
+
 To put the parts back together (any part will do; the manifest is checked when present):
 
 ```
@@ -101,7 +111,8 @@ zipwise join holiday.zip.001 -o holiday.zip
 ```
 
 `zipwise split FILE --size SIZE|PRESET [-o DIR]` cuts any file the same way (the original is
-kept unless you add `--delete-source`).
+kept unless you add `--delete-source`). A file that already fits in one part is left alone:
+nothing is written, Zipwise says so and exits 0.
 
 ### List, info, test
 
@@ -114,7 +125,7 @@ zipwise test photos.zip
    Size  Packed  Ratio  Modified          Flags  Name
       -       -      -  2026-11-11 11:10  d-     photos
 12.0 KB    43 B     0%  2026-11-11 11:10  --     photos/a.txt
- 3.0 KB  3.0 KB   100%  2026-11-11 11:10  --     photos/b.jpg
+ 3.0 KB  3.0 KB      -  2026-11-11 11:10  --     photos/b.jpg
   650 B    22 B     3%  2026-11-11 11:10  --     notes.txt
 4 entries, 15.7 KB, 3.1 KB packed (20%)
 ```
@@ -134,7 +145,7 @@ note: names were decoded as cp1256 (confidence 95%); use --encoding ENC if they 
 تقرير_المبيعات.txt
 فاتورة 2024.txt
 صورة.txt
-4 entries, 122 B, 122 B packed (100%)
+4 entries, 122 B, 122 B packed
 ```
 
 If the guess is wrong, say which encoding to use. It applies to `list`, `info` and `extract`:
@@ -157,10 +168,11 @@ Without `-o`, Zipwise looks at the archive: if everything sits under one top-lev
 extracts into the current folder, otherwise it creates a folder named after the archive.
 `-o DIR` picks the destination; `--here` always uses the current folder.
 
-To extract only some entries, put the names before the options:
+To extract only some entries, list their names. Names and options can come in any order:
 
 ```
 zipwise extract backup.7z notes.txt photos -o restored
+zipwise extract backup.7z -o restored --strip-components 1 photos
 ```
 
 Other options: `--on-conflict skip|rename|overwrite|ask` (the default is `ask` on a terminal and
@@ -183,7 +195,8 @@ archive always starts from the beginning.
 ### Machine-readable output
 
 `--json` (before or after the command) prints one JSON document on stdout. Progress is not
-drawn, and warnings and errors are also repeated on stderr as text.
+drawn, and warnings and errors are also repeated on stderr as text. Every path in the document
+is absolute, however it was typed.
 
 ```
 zipwise extract evil.zip -o out --json
@@ -205,8 +218,8 @@ zipwise extract evil.zip -o out --json
   "bytes_done": 4,
   "output_paths": ["/home/me/out"],
   "elapsed": 0.015,
-  "archive": "evil.zip",
-  "destination": "out",
+  "archive": "/home/me/evil.zip",
+  "destination": "/home/me/out",
   "exit_code": 1
 }
 ```

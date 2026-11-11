@@ -12,14 +12,16 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
-from ..errors import ExitCode, UsageError, ZipwiseError
+from ..errors import ExitCode, PasswordRequired, UsageError, ZipwiseError
 from ..fsutil import translate_oserror
 from ..jobs import CancelToken, JobContext
 from ..model import (
     ConflictAction,
     CreateOptions,
     ExtractOptions,
+    Issue,
     OperationReport,
 )
 from ..ops import (
@@ -29,6 +31,7 @@ from ..ops import (
     list_archive,
     test_archive,
 )
+from ..ops.create import SPLIT_NOT_NEEDED
 from ..settings import load_settings
 from ..split import (
     find_parts,
@@ -38,7 +41,13 @@ from ..split import (
     recipient_notes,
     split_file,
 )
-from .parser import PASSWORD_PROMPT, format_from_name, level_arg, suffix_of
+from .parser import (
+    PASSWORD_COMMANDS,
+    PASSWORD_PROMPT,
+    format_from_name,
+    level_arg,
+    suffix_of,
+)
 from .render import (
     ProgressBar,
     Result,
@@ -46,8 +55,15 @@ from .render import (
     format_listing,
     human_size,
     listing_footer,
-    percent,
     plural,
+    saving_percent,
+)
+
+T = TypeVar("T")
+
+PASSWORD_FLAGS_HINT = (
+    "Give the password with --password=VALUE or --password-file FILE, "
+    "or a bare -p to type it on a terminal."
 )
 
 _LEGACY_SKIP = ("ascii", "utf-8", "utf8")
@@ -148,7 +164,35 @@ def _read_password(args: argparse.Namespace, env: RunEnv, *, confirm: bool) -> s
     return value
 
 
+def _with_password(
+    env: RunEnv, password: str | None, call: Callable[[str | None], T]
+) -> tuple[T, str | None]:
+    """Run ``call(password)``; when the archive turns out to need a password that was not
+    given, ask once on a terminal and retry. Returns the value and the password used."""
+    try:
+        return call(password), password
+    except PasswordRequired:
+        if password is not None:
+            raise
+        asked = _password_prompt(env)()
+        if not asked:
+            raise
+    return call(asked), asked
+
+
+def with_cli_hint(command: str, exc: ZipwiseError) -> ZipwiseError:
+    """Replace the front-end neutral password hint with the flags this command accepts."""
+    if isinstance(exc, PasswordRequired) and command in PASSWORD_COMMANDS:
+        exc.hint = PASSWORD_FLAGS_HINT
+    return exc
+
+
 # -- helpers ----------------------------------------------------------------------------------
+
+
+def _abs(path: Path | str) -> str:
+    """Paths in JSON output are always absolute."""
+    return os.path.abspath(path)
 
 
 def _existing(path: str) -> Path:
@@ -177,7 +221,9 @@ def archive_stem(name: str) -> str:
 
 
 def _issue_data(report: OperationReport) -> dict[str, object]:
-    return dict(report.to_dict())
+    data = dict(report.to_dict())
+    data["output_paths"] = [_abs(p) for p in report.output_paths]
+    return data
 
 
 def _report_result(command: str, report: OperationReport, **extra: object) -> Result:
@@ -246,23 +292,26 @@ def run_create(args: argparse.Namespace, env: RunEnv) -> Result:
     result = _report_result(
         "create",
         report,
-        archive=str(target),
+        archive=_abs(target),
         format=fmt.value,
         verified=options.verify,
         encrypted=password is not None,
         input_bytes=report.bytes_done,
         archive_bytes=archive_bytes,
-        parts=[str(p) for p in parts],
+        parts=[_abs(p) for p in parts],
     )
     stats = [plural(report.entries_done, "entry")]
     if report.bytes_done > 0:
-        stats.append(
-            f"{human_size(report.bytes_done)} {arrow(sys.stdout)} {human_size(archive_bytes)}, "
-            f"{percent(archive_bytes, report.bytes_done)}"
-        )
+        sizes = f"{human_size(report.bytes_done)} {arrow(sys.stdout)} {human_size(archive_bytes)}"
+        saved = saving_percent(archive_bytes, report.bytes_done)
+        stats.append(f"{sizes}, {saved}" if saved else sizes)
     where = f"{target} in {plural(len(parts), 'part')}" if parts else str(target)
     tail = " and verified it." if options.verify else "."
     result.summary = f"Created {where} ({', '.join(stats)}){tail}"
+    if any(i.code == SPLIT_NOT_NEEDED for i in report.issues):
+        # said in the summary instead of as a separate "info:" line
+        result.issues = [i for i in result.issues if i.code != SPLIT_NOT_NEEDED]
+        result.summary += f" It fits in one part of {human_size(args.split)}, so it was not split."
     if parts:
         result.details = [str(p) for p in outputs]
     return result
@@ -271,8 +320,14 @@ def run_create(args: argparse.Namespace, env: RunEnv) -> Result:
 # -- extract ----------------------------------------------------------------------------------
 
 
-def _smart_destination(archive: Path, names: list[str], encoding: str | None, strip: int) -> Path:
-    entries = list_archive(archive, name_encoding=encoding)
+def _smart_destination(
+    archive: Path,
+    names: list[str],
+    encoding: str | None,
+    strip: int,
+    password: str | None = None,
+) -> Path:
+    entries = list_archive(archive, name_encoding=encoding, password=password)
     chosen = [e.name.replace("\\", "/").strip("/") for e in entries]
     if names:
         wanted = [n.replace("\\", "/").strip("/") for n in names]
@@ -313,7 +368,11 @@ def run_extract(args: argparse.Namespace, env: RunEnv) -> Result:
     elif args.here:
         dest = Path.cwd()
     else:
-        dest = _smart_destination(archive, args.names, encoding, args.strip_components)
+        dest, password = _with_password(
+            env,
+            password,
+            lambda pw: _smart_destination(archive, args.names, encoding, args.strip_components, pw),
+        )
     options = ExtractOptions(
         password=password,
         name_encoding=encoding,
@@ -325,7 +384,7 @@ def run_extract(args: argparse.Namespace, env: RunEnv) -> Result:
         strip_components=args.strip_components,
     )
     report = extract_archive(archive, dest, options, make_context(env))
-    result = _report_result("extract", report, archive=str(archive), destination=str(dest))
+    result = _report_result("extract", report, archive=_abs(archive), destination=_abs(dest))
     text = f"Extracted {plural(report.entries_done, 'entry')} to {dest}"
     if report.entries_skipped:
         text += f" ({report.entries_skipped} skipped)"
@@ -339,12 +398,17 @@ def run_extract(args: argparse.Namespace, env: RunEnv) -> Result:
 def run_list(args: argparse.Namespace, env: RunEnv) -> Result:
     archive = _existing(args.archive)
     encoding = _check_encoding(args.encoding)
+    password = _read_password(args, env, confirm=False)
     ctx = make_context(env)
-    entries = list_archive(archive, name_encoding=encoding, ctx=ctx)
+    entries, password = _with_password(
+        env,
+        password,
+        lambda pw: list_archive(archive, password=pw, name_encoding=encoding, ctx=ctx),
+    )
     detected: str | None = encoding
     confidence: float | None = None
     try:
-        info = archive_info(archive, name_encoding=encoding, ctx=ctx)
+        info = archive_info(archive, password=password, name_encoding=encoding, ctx=ctx)
         detected, confidence = info.name_encoding, info.encoding_confidence
     except ZipwiseError:
         pass
@@ -358,7 +422,7 @@ def run_list(args: argparse.Namespace, env: RunEnv) -> Result:
         )
     files = [e for e in entries if e.type.value == "file"]
     result.data = {
-        "archive": str(archive),
+        "archive": _abs(archive),
         "entries_count": len(entries),
         "total_size": sum(max(e.size, 0) for e in files),
         "name_encoding": detected,
@@ -373,7 +437,7 @@ def run_test(args: argparse.Namespace, env: RunEnv) -> Result:
     password = _read_password(args, env, confirm=False)
     report = test_archive(archive, password=password, ctx=make_context(env))
     total = report.entries_done + report.entries_skipped
-    result = _report_result("test", report, archive=str(archive), entries_count=total)
+    result = _report_result("test", report, archive=_abs(archive), entries_count=total)
     if not report.ok:
         bad = report.entries_skipped
         result.exit_code = int(ExitCode.CORRUPT)
@@ -386,14 +450,20 @@ def run_test(args: argparse.Namespace, env: RunEnv) -> Result:
 
 def run_info(args: argparse.Namespace, env: RunEnv) -> Result:
     archive = _existing(args.archive)
-    info = archive_info(
-        archive, name_encoding=_check_encoding(args.encoding), ctx=make_context(env)
+    encoding = _check_encoding(args.encoding)
+    password = _read_password(args, env, confirm=False)
+    ctx = make_context(env)
+    info, _ = _with_password(
+        env,
+        password,
+        lambda pw: archive_info(archive, password=pw, name_encoding=encoding, ctx=ctx),
     )
-    ratio = percent(info.compressed_size, info.total_size)
+    ratio = saving_percent(info.compressed_size, info.total_size) or "-"
     names = info.name_encoding or "-"
     if info.name_encoding and info.encoding_confidence is not None:
         names += f" (confidence {round(info.encoding_confidence * 100)}%)"
     result = Result("info", data=dict(info.to_dict()))
+    result.data["path"] = _abs(info.path)
     result.lines = [
         f"Archive:    {info.path}",
         f"Format:     {info.format.value}",
@@ -418,6 +488,9 @@ def run_split(args: argparse.Namespace, env: RunEnv) -> Result:
     source = _existing(args.file)
     if not source.is_file():
         raise UsageError(f"Not a file: {source}")
+    size = source.stat().st_size
+    if size <= args.size:
+        return _split_not_needed(source, size, args.size)
     out_dir = Path(args.out_dir) if args.out_dir else source.parent
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -440,14 +513,35 @@ def run_split(args: argparse.Namespace, env: RunEnv) -> Result:
     result = _report_result(
         "split",
         report,
-        source=str(source),
+        source=_abs(source),
         part_size=args.size,
-        parts=[{"path": str(p), "size": s} for p, s in zip(parts, sizes, strict=True)],
-        manifest=str(manifest),
-        notes=str(notes),
+        parts=[{"path": _abs(p), "size": s} for p, s in zip(parts, sizes, strict=True)],
+        manifest=_abs(manifest),
+        notes=_abs(notes),
     )
     result.details = [f"{p}  ({human_size(s)})" for p, s in zip(parts, sizes, strict=True)]
     result.summary = f"Split {source.name} into {plural(len(parts), 'part')} in {out_dir}."
+    return result
+
+
+def _split_not_needed(source: Path, size: int, part_size: int) -> Result:
+    """A file that fits in one part is left alone: no parts, manifest or notes."""
+    message = f"{source.name} fits in one part of {part_size} bytes, so it was not split"
+    report = OperationReport.build([Issue("info", SPLIT_NOT_NEEDED, None, message)])
+    result = _report_result(
+        "split",
+        report,
+        source=_abs(source),
+        part_size=part_size,
+        parts=[],
+        manifest=None,
+        notes=None,
+    )
+    result.issues = []  # the summary says it
+    result.summary = (
+        f"{source.name} ({human_size(size)}) already fits in one part of "
+        f"{human_size(part_size)}; nothing to split."
+    )
     return result
 
 
@@ -460,7 +554,7 @@ def run_join(args: argparse.Namespace, env: RunEnv) -> Result:
         [], entries_done=count, bytes_done=output.stat().st_size, output_paths=[output]
     )
     result = _report_result(
-        "join", report, output=str(output), parts_count=count, verified=verified
+        "join", report, output=_abs(output), parts_count=count, verified=verified
     )
     note = " and checked them against the manifest" if verified else ""
     result.summary = f"Joined {plural(count, 'part')} into {output}{note}."

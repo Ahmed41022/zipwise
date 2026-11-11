@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from typing import Any
 
 from .. import __version__
@@ -11,6 +12,9 @@ from ..model import FormatId
 from ..split import parse_size
 
 COMMAND_NAMES = ("create", "extract", "list", "test", "info", "split", "join")
+
+# Sub-commands that take ``-p/--password`` and ``--password-file``.
+PASSWORD_COMMANDS = ("create", "extract", "list", "test", "info")
 
 # Value of ``-p`` / ``--password`` given without a value: ask on the terminal.
 PASSWORD_PROMPT = "\x00prompt"
@@ -125,9 +129,31 @@ class _Parser(argparse.ArgumentParser):
         raise ParserError(message, self.format_usage(), self.prog)
 
 
-def _globals() -> _Parser:
+class _CommandParser(_Parser):
+    """A sub-command parser whose positionals and options may come in any order.
+
+    The sub-parsers action calls ``parse_known_args``; routing that through the intermixed
+    variant lets ``extract a.7z -o out notes.txt`` work. On Python 3.11 and 3.12 the
+    intermixed parse itself calls ``parse_known_args`` again, hence the re-entry guard.
+    """
+
+    _intermixed_active = False
+
+    def parse_known_args(  # type: ignore[override]
+        self, args: Sequence[str] | None = None, namespace: Any = None
+    ) -> tuple[Any, list[str]]:
+        if self._intermixed_active:
+            return super().parse_known_args(args, namespace)
+        self._intermixed_active = True
+        try:
+            return self.parse_known_intermixed_args(args, namespace)
+        finally:
+            self._intermixed_active = False
+
+
+def _globals() -> _CommandParser:
     """Options accepted before or after the sub-command (SUPPRESS keeps the first value)."""
-    common = _Parser(add_help=False)
+    common = _CommandParser(add_help=False)
     group = common.add_argument_group("global options")
     group.add_argument(
         "--json",
@@ -180,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"zipwise {__version__}")
     sub = parser.add_subparsers(
-        dest="command", metavar="COMMAND", parser_class=_Parser, required=True
+        dest="command", metavar="COMMAND", parser_class=_CommandParser, required=True
     )
 
     def add(name: str, summary: str, example: str) -> argparse.ArgumentParser:
@@ -283,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-l", "--long", action="store_true", help="show size, packed size, ratio, date and flags"
     )
+    _password_args(p, confirm_note="once (needed for 7z with encrypted names)")
 
     # -- test -----------------------------------------------------------------------------
     p = add("test", "check that an archive is intact", "zipwise test backup.zip")
@@ -293,6 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("info", "show format, sizes, encryption and name encoding", "zipwise info backup.zip")
     p.add_argument("archive", metavar="ARCHIVE")
     p.add_argument("--encoding", metavar="ENC", help="file-name encoding of legacy ZIPs")
+    _password_args(p, confirm_note="once (needed for 7z with encrypted names)")
 
     # -- split ----------------------------------------------------------------------------
     p = add(

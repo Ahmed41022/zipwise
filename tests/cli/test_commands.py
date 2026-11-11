@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -143,8 +145,21 @@ def test_create_split_round_trip(run: RunFn, tmp_path: Path) -> None:
 def test_create_split_preset_name_is_accepted(run: RunFn, data: Path, tmp_path: Path) -> None:
     result = run("create", "--split", "email", tmp_path / "p.zip", data)
     assert result.code == 0
-    assert (tmp_path / "p.zip.001").is_file()
-    assert "1 part" in result.out
+    assert (tmp_path / "p.zip").is_file()  # far smaller than 25 MB: kept whole
+
+
+def test_create_split_not_needed_keeps_one_plain_archive(
+    run: RunFn, data: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "made" / "p.zip"
+    result = run("create", "--split", "1M", out, data)
+    assert result.code == 0 and result.err == ""
+    assert "fits in one part of 1.0 MB, so it was not split" in result.out
+    assert [p.name for p in out.parent.iterdir()] == ["p.zip"]
+    doc = run("create", "--json", "--force", "--split", "1M", out, data).json()
+    assert doc["parts"] == [] and doc["output_paths"] == [str(out)]
+    assert [i["code"] for i in doc["issues"]] == ["split-not-needed"]
+    assert doc["issues"][0]["severity"] == "info" and doc["exit_code"] == 0
 
 
 def test_create_follow_symlinks_flag_is_accepted(run: RunFn, data: Path, tmp_path: Path) -> None:
@@ -278,6 +293,66 @@ def test_password_never_appears_in_output(
         text = r.out + r.err
         assert "unique-secret" not in text and "unique-wrong" not in text
     assert created.code == 0 and wrong.code == 6
+
+
+@pytest.fixture
+def hidden_names_7z(run: RunFn, data: Path, tmp_path: Path) -> Path:
+    """A 7z whose file names are encrypted too (password ``pw-7z``)."""
+    out = tmp_path / "hidden.7z"
+    assert run("create", "--password=pw-7z", "--encrypt-names", out, data).code == 0
+    return out
+
+
+@pytest.mark.parametrize("command", ["list", "info", "test"])
+def test_encrypted_names_without_password_exit_6_with_cli_hint(
+    run: RunFn, hidden_names_7z: Path, command: str
+) -> None:
+    result = run(command, hidden_names_7z)
+    assert result.code == 6
+    assert "hint:" in result.err and "--password-file" in result.err
+    assert "dialog" not in result.err
+    doc = run(command, "--json", hidden_names_7z).json()
+    assert doc["error"]["code"] == "password-required"
+    assert "--password-file" in (doc["error"]["hint"] or "")
+
+
+def test_list_and_info_take_a_password(run: RunFn, hidden_names_7z: Path, tmp_path: Path) -> None:
+    listed = run("list", hidden_names_7z, "--password=pw-7z")
+    assert listed.code == 0 and "data/sub/b.txt" in listed.out
+    pw = tmp_path / "pw7.txt"
+    pw.write_text("pw-7z\n", encoding="utf-8")
+    info = run("info", "--json", "--password-file", pw, hidden_names_7z).json()
+    assert info["format"] == "7z" and info["encrypted"] is True
+    assert run("list", "-p", "wrong", hidden_names_7z).code == 6
+
+
+@pytest.mark.parametrize("command", ["list", "info"])
+def test_list_and_info_ask_for_a_needed_password_on_a_terminal(
+    run: RunFn, hidden_names_7z: Path, tty, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    tty()
+    asked: list[str] = []
+
+    def fake(prompt: str = "") -> str:
+        asked.append(prompt)
+        return "pw-7z"
+
+    monkeypatch.setattr("getpass.getpass", fake)
+    result = run(command, hidden_names_7z)
+    assert result.code == 0, result.err
+    assert asked == ["Password: "]
+
+
+def test_bare_password_flag_on_list_without_terminal(run: RunFn, hidden_names_7z: Path) -> None:
+    result = run("list", hidden_names_7z, "-p")
+    assert result.code == 2 and "--password-file" in result.err
+
+
+def test_smart_extract_of_hidden_names_uses_the_password(
+    run: RunFn, hidden_names_7z: Path, isolated_environment: Path
+) -> None:
+    assert run("extract", hidden_names_7z, "--password=pw-7z").code == 0
+    assert (isolated_environment / "data" / "a.txt").is_file()
 
 
 # -- extract --------------------------------------------------------------------------------
@@ -622,6 +697,22 @@ def test_split_keep_flag(run: RunFn, blob: Path, tmp_path: Path) -> None:
     assert blob.exists()
 
 
+@pytest.mark.parametrize("size", ["25000", "1M"])
+def test_split_a_file_that_fits_does_nothing(
+    run: RunFn, blob: Path, tmp_path: Path, size: str
+) -> None:
+    parts = tmp_path / "p"
+    result = run("split", blob, "--size", size, "-o", parts, "--delete-source")
+    assert result.code == 0 and result.err == ""
+    assert "already fits in one part" in result.out and "nothing to split" in result.out
+    assert blob.exists() and not parts.exists()
+    assert not list(tmp_path.glob("blob.bin.*")) and not (tmp_path / "HOW-TO-OPEN.txt").exists()
+    doc = run("split", "--json", blob, "--size", size).json()
+    assert doc["ok"] is True and doc["exit_code"] == 0
+    assert doc["parts"] == [] and doc["manifest"] is None and doc["notes"] is None
+    assert [i["code"] for i in doc["issues"]] == ["split-not-needed"]
+
+
 def test_split_missing_file(run: RunFn, tmp_path: Path) -> None:
     assert run("split", tmp_path / "gone", "--size", "1M").code == 2
 
@@ -736,6 +827,122 @@ def test_json_stdout_is_exactly_one_document(
     decoder = json.JSONDecoder()
     doc, end = decoder.raw_decode(result.out)
     assert result.out[end:].strip() == "" and doc["command"] == command
+
+
+def test_json_paths_are_absolute(run: RunFn, tmp_path: Path, isolated_environment: Path) -> None:
+    cwd = isolated_environment
+    (cwd / "src").mkdir()
+    (cwd / "src" / "r.bin").write_bytes(random_bytes(4, 30_000))
+    (cwd / "blob.bin").write_bytes(random_bytes(5, 25_000))
+
+    def absolute(value: object) -> bool:
+        return isinstance(value, str) and os.path.isabs(value)
+
+    made = run("create", "--json", "--split", "10000", "s.zip", "src").json()
+    assert absolute(made["archive"]) and made["parts"]
+    assert all(absolute(p) for p in [*made["parts"], *made["output_paths"]])
+    whole = run("create", "--json", "w.zip", "src").json()
+    assert absolute(whole["archive"]) and all(absolute(p) for p in whole["output_paths"])
+    assert whole["archive"] == str(cwd / "w.zip")
+    for doc in (
+        run("list", "--json", "w.zip").json(),
+        run("test", "--json", "w.zip").json(),
+        run("extract", "--json", "w.zip", "-o", "out").json(),
+    ):
+        assert absolute(doc["archive"]), doc
+        assert all(absolute(p) for p in doc.get("output_paths", []))
+    assert run("extract", "--json", "w.zip", "-o", "out2").json()["destination"] == str(
+        cwd / "out2"
+    )
+    assert absolute(run("info", "--json", "w.zip").json()["path"])
+    split = run("split", "--json", "blob.bin", "--size", "10000", "-o", "parts").json()
+    assert absolute(split["source"]) and absolute(split["manifest"]) and absolute(split["notes"])
+    assert all(absolute(p["path"]) for p in split["parts"])
+    assert all(absolute(p) for p in split["output_paths"])
+    joined = run("join", "--json", "parts/blob.bin.001", "-o", "j.bin").json()
+    assert absolute(joined["output"]) and all(absolute(p) for p in joined["output_paths"])
+
+
+# -- ratio display --------------------------------------------------------------------------
+
+
+def test_create_summary_hides_the_ratio_when_the_archive_grew(run: RunFn, tmp_path: Path) -> None:
+    src = tmp_path / "tiny.txt"
+    src.write_text("abcd")
+    result = run("create", tmp_path / "tiny.zip", src)
+    assert result.code == 0
+    assert "%" not in result.out and "4 B" in result.out
+
+
+def test_create_summary_shows_the_ratio_when_it_shrank(run: RunFn, tmp_path: Path) -> None:
+    src = tmp_path / "big.txt"
+    src.write_bytes(b"compress me " * 2000)
+    result = run("create", tmp_path / "s.zip", src)
+    assert result.code == 0 and "%)" in result.out
+
+
+def test_list_long_and_info_hide_the_ratio_for_a_grown_archive(run: RunFn, tmp_path: Path) -> None:
+    src = tmp_path / "tiny.txt"
+    src.write_text("abcdefg")
+    out = tmp_path / "tiny.zip"
+    assert run("create", out, src).code == 0
+    listed = run("list", "-l", out)
+    assert "%" not in listed.out
+    info = run("info", out)
+    assert "Ratio:      -" in info.out
+    doc = run("info", "--json", out).json()
+    assert doc["total_size"] == 7 and isinstance(doc["compressed_size"], int)
+
+
+# -- interactivity ----------------------------------------------------------------------------
+
+
+class _FdTTY(FakeTTY):
+    def fileno(self) -> int:
+        return 0
+
+
+def test_prompts_need_both_stdin_and_stderr_to_be_terminals() -> None:
+    from zipwise.cli.main import interactive_terminal
+
+    assert interactive_terminal(FakeTTY(), FakeTTY()) is True
+    assert interactive_terminal(FakeTTY(), io.StringIO()) is False
+    assert interactive_terminal(io.StringIO(), FakeTTY()) is False
+
+
+def test_a_character_device_that_is_not_a_console_is_not_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zipwise.cli import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_is_console", lambda fd: False)  # what NUL looks like
+    assert main_mod.is_terminal(_FdTTY()) is False
+    assert main_mod.interactive_terminal(_FdTTY(), _FdTTY()) is False
+    monkeypatch.setattr(main_mod, "_is_console", lambda fd: True)
+    assert main_mod.interactive_terminal(_FdTTY(), _FdTTY()) is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows NUL device")
+def test_windows_nul_device_is_not_a_console() -> None:
+    from zipwise.cli.main import _is_console, is_terminal
+
+    with open(os.devnull) as nul:
+        assert nul.isatty()  # the reason for the extra check
+        assert _is_console(nul.fileno()) is False
+        assert is_terminal(nul) is False
+
+
+def test_password_is_not_asked_when_stdin_is_a_null_device(
+    run: RunFn, secret_archive: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def never(prompt: str = "") -> str:
+        raise AssertionError("must not prompt")
+
+    monkeypatch.setattr("getpass.getpass", never)
+    with open(os.devnull) as nul:
+        monkeypatch.setattr(sys, "stdin", nul)
+        result = run("test", secret_archive)
+    assert result.code == 6
 
 
 def test_json_with_warnings_keeps_stdout_clean(run: RunFn, archive: Path, occupied: Path) -> None:

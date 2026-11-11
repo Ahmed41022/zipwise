@@ -42,10 +42,14 @@ def run(capsys: pytest.CaptureFixture[str]) -> RunFn:
 
 @pytest.fixture
 def tty(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
-    """Make stdin a terminal that answers ``input()`` with the given lines."""
+    """Make stdin a terminal that answers ``input()`` with the given lines.
+
+    stderr stays captured by pytest, so the "both are terminals" check is switched on too.
+    """
 
     def install(*answers: str) -> None:
         monkeypatch.setattr(sys, "stdin", FakeTTY())
+        monkeypatch.setattr("zipwise.cli.main.interactive_terminal", lambda stdin, stderr: True)
         replies = iter(answers)
 
         def fake_input(prompt: str = "") -> str:

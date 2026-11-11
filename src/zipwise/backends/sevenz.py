@@ -28,6 +28,7 @@ from py7zr.member import (
 from py7zr.properties import FILTER_CRYPTO_AES256_SHA256, FILTER_LZMA2
 
 from ..errors import (
+    PASSWORD_REQUIRED_HINT,
     CorruptArchive,
     IOFailure,
     PasswordRequired,
@@ -237,8 +238,7 @@ class SevenZipReader(ArchiveReader):
         except py7zr.exceptions.PasswordRequired as exc:
             fh.close()
             raise PasswordRequired(
-                "This archive is password protected",
-                hint="Provide the password with --password or in the password dialog.",
+                "This archive is password protected", hint=PASSWORD_REQUIRED_HINT
             ) from exc
         except Bad7zFile as exc:
             fh.close()
