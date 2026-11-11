@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import stat
 import zipfile
@@ -12,11 +11,9 @@ import pytest
 from helpers.jobs import stepping_context
 from helpers.trees import BASE_MTIME, SHAPES, Link, make_tree, text_bytes
 from zipwise.backends import zip as zipmod
-from zipwise.errors import BackendUnavailable, Cancelled, CorruptArchive, IOFailure, UsageError
+from zipwise.errors import Cancelled, CorruptArchive, IOFailure, UsageError
 from zipwise.model import CreateOptions, FormatId, Issue
 from zipwise.ops import create_archive, list_archive
-
-NO_7Z = importlib.util.find_spec("zipwise.backends.sevenz") is None
 
 
 def leftovers(folder: Path) -> list[str]:
@@ -143,14 +140,6 @@ def test_split_size_creates_numbered_parts_and_no_whole_file(tmp_path: Path) -> 
     assert "t.zip" not in names
     assert [n for n in names if n.startswith("t.zip.0")][0] == "t.zip.001"
     assert {p.name for p in report.output_paths} == set(names) - {"src"}
-
-
-@pytest.mark.skipif(not NO_7Z, reason="7z backend exists")
-def test_formats_without_a_backend_fail_cleanly(tmp_path: Path) -> None:
-    tree = make_tree(tmp_path / "src" / "t", SHAPES["simple"])
-    with pytest.raises(BackendUnavailable):
-        create_archive([tree], tmp_path / "t.7z", CreateOptions(format=FormatId.SEVENZ))
-    assert leftovers(tmp_path) == ["src"]
 
 
 def test_rar_cannot_be_created(tmp_path: Path) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
 import pytest
@@ -8,9 +7,7 @@ import pytest
 from zipwise import registry
 from zipwise.backends.base import ArchiveReader, ArchiveWriter
 from zipwise.errors import BackendUnavailable, UnsupportedFormat
-from zipwise.model import CreateOptions, FormatId
-
-NOT_YET = [f for f in FormatId if f is not FormatId.ZIP]
+from zipwise.model import FormatId
 
 
 @pytest.mark.parametrize("fmt", list(FormatId), ids=lambda f: f.name)
@@ -35,14 +32,9 @@ def test_rar_is_read_only_and_needs_a_tool() -> None:
         registry.get_writer_class(FormatId.RAR)
 
 
-@pytest.mark.parametrize("fmt", NOT_YET, ids=lambda f: f.name)
-def test_unwritten_backend_modules_raise_backend_unavailable(fmt: FormatId) -> None:
-    module = registry.capability(fmt).module
-    if importlib.util.find_spec(module) is not None:  # pragma: no cover - later milestones
-        pytest.skip(f"{module} exists now")
-    with pytest.raises(BackendUnavailable) as info:
-        registry.get_reader_class(fmt)
-    assert fmt.value in info.value.message
+@pytest.mark.parametrize("fmt", list(FormatId), ids=lambda f: f.name)
+def test_every_reader_class_loads(fmt: FormatId) -> None:
+    assert issubclass(registry.get_reader_class(fmt), ArchiveReader)
 
 
 def test_zip_row_capabilities() -> None:
@@ -90,23 +82,3 @@ def test_get_reader_detects_the_format(tmp_path: Path) -> None:
     with registry.get_reader(path) as reader:
         assert reader.format is FormatId.ZIP
         assert [e.name for e in reader.entries()] == ["a"]
-
-
-def test_get_reader_for_unwritten_backend(tmp_path: Path) -> None:
-    import gzip
-
-    path = tmp_path / "x.gz"
-    path.write_bytes(gzip.compress(b"hi"))
-    module = registry.capability(FormatId.GZ).module
-    if importlib.util.find_spec(module) is not None:  # pragma: no cover - later milestones
-        pytest.skip("single-file backend exists now")
-    with pytest.raises(BackendUnavailable):
-        registry.get_reader(path)
-
-
-def test_get_writer_for_unwritten_backend() -> None:
-    module = registry.capability(FormatId.SEVENZ).module
-    if importlib.util.find_spec(module) is not None:  # pragma: no cover - later milestones
-        pytest.skip("7z backend exists now")
-    with pytest.raises(BackendUnavailable):
-        registry.get_writer(Path("x"), CreateOptions(format=FormatId.SEVENZ))
