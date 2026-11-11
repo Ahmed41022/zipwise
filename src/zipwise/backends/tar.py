@@ -51,8 +51,10 @@ def _timestamp(value: float) -> datetime | None:
 class _Source:
     """An open tar stream: file, decompressor and ``TarFile`` in stream mode."""
 
-    def __init__(self, path: Path, codec: str, encoding: str) -> None:
-        self.fh: BinaryIO = streams.open_source(path)
+    def __init__(
+        self, path: Path, codec: str, encoding: str, source: BinaryIO | None = None
+    ) -> None:
+        self.fh: BinaryIO = streams.open_input(path, source)
         self.stream: Any = None
         self.tar: tarfile.TarFile | None = None
         self.pos = -1
@@ -128,22 +130,28 @@ class TarReader(ArchiveReader):
     format = FormatId.TAR
 
     def __init__(
-        self, path: Path, *, password: str | None = None, name_encoding: str | None = None
+        self,
+        path: Path,
+        *,
+        password: str | None = None,
+        name_encoding: str | None = None,
+        source: BinaryIO | None = None,
     ) -> None:
-        super().__init__(path, password=password, name_encoding=name_encoding)
+        super().__init__(path, password=password, name_encoding=name_encoding, source=source)
         if name_encoding is not None:
             try:
                 codecs.lookup(name_encoding)
             except LookupError:
                 raise UsageError(f"Unknown name encoding: {name_encoding}") from None
-        with streams.open_source(self.path) as fh:
+        with streams.open_input(self.path, self.source) as fh:
             self._codec = streams.sniff_codec(fh.read(8))
         self.format = _FORMAT_OF_CODEC[self._codec]
         self._entries: list[ArchiveEntry] | None = None
+        self._damage: CorruptArchive | None = None
         self._current: _Source | None = None
 
     def _open(self) -> _Source:
-        return _Source(self.path, self._codec, self.name_encoding or "utf-8")
+        return _Source(self.path, self._codec, self.name_encoding or "utf-8", self.source)
 
     @staticmethod
     def _entry(info: tarfile.TarInfo, index: int) -> ArchiveEntry:
@@ -169,20 +177,35 @@ class TarReader(ArchiveReader):
             index=index,
         )
 
-    def entries(self) -> list[ArchiveEntry]:
-        if self._entries is not None:
-            return self._entries
-        ctx = JobContext()
+    def _scan(self) -> tuple[list[ArchiveEntry], CorruptArchive | None]:
+        """Every member header, plus the damage that stopped the scan early (if any)."""
         result: list[ArchiveEntry] = []
         src = self._open()
         try:
             while (info := src.next()) is not None:
                 result.append(self._entry(info, src.pos))
-            src.drain(ctx)
+            src.drain(JobContext())
+        except CorruptArchive as exc:
+            return result, exc
         finally:
             src.close()
-        self._entries = result
-        return result
+        return result, None
+
+    def entries(self) -> list[ArchiveEntry]:
+        if self._entries is None:
+            result, damage = self._scan()
+            if damage is not None:
+                raise damage
+            self._entries = result
+        return self._entries
+
+    def extractable_entries(self) -> list[ArchiveEntry]:
+        if self._entries is None:
+            result, self._damage = self._scan()
+            if self._damage is not None:
+                return result
+            self._entries = result
+        return self.entries()
 
     # -- extraction ------------------------------------------------------------------------
 
@@ -209,6 +232,8 @@ class TarReader(ArchiveReader):
     def extract(self, entries: Sequence[ArchiveEntry], sink: EntrySink, ctx: JobContext) -> None:
         try:
             self.pull_extract(entries, sink, ctx, self._open_entry)  # type: ignore[arg-type]
+            if self._damage is not None:  # the damage lies after the last selected entry
+                raise self._damage
             src = self._current
             if src is not None and len(entries) == len(self.entries()):
                 src.drain(ctx)
@@ -241,10 +266,7 @@ class TarReader(ArchiveReader):
 
     def info(self) -> ArchiveInfo:
         entries = self.entries()
-        try:
-            packed = os.stat(self.path).st_size
-        except OSError as exc:
-            raise translate_oserror(exc, f"cannot read {self.path.name}") from exc
+        packed = streams.input_size(self.path, self.source)
         return ArchiveInfo(
             path=self.path,
             format=self.format,
@@ -260,6 +282,7 @@ class TarReader(ArchiveReader):
         if self._current is not None:
             self._current.close()
             self._current = None
+        self.run_cleanups()
 
 
 class _CountingReader:

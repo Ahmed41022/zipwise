@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import BinaryIO, cast
 
 from ..backends.base import ArchiveReader
-from ..detect import HEAD_SIZE, Detection, detect, sniff
+from ..detect import HEAD_SIZE, Detection, detect, sniff, sniff_stream
 from ..errors import CorruptArchive, PasswordRequired, UnsupportedFormat
 from ..jobs import JobContext
 from ..model import ArchiveEntry, EntryType
@@ -89,7 +89,7 @@ def open_input_reader(
     first = parts.first
     joined = MultiPartFile(parts.parts)
     try:
-        fmt = sniff(joined.read(HEAD_SIZE))  # the first part may be tiny: sniff the joined head
+        fmt = sniff_stream(cast(BinaryIO, joined))  # the first part may be tiny: read the set
         if fmt is None:
             raise UnsupportedFormat(
                 f"Unrecognised archive format: {first.name}",
@@ -104,6 +104,15 @@ def open_input_reader(
     reader.origin = first
     reader.multipart = True
     return reader
+
+
+def progress_total(entries: list[ArchiveEntry]) -> int:
+    """Byte total for progress events: the sum of file sizes, or 0 ("unknown", shown as an
+    indeterminate bar) when any file's size is unknown (negative, as in a .bz2 or .xz)."""
+    sizes = [e.size for e in entries if e.type is EntryType.FILE]
+    if any(size < 0 for size in sizes):
+        return 0
+    return sum(sizes)
 
 
 def ensure_password(reader: ArchiveReader, entries: list[ArchiveEntry], ctx: JobContext) -> None:

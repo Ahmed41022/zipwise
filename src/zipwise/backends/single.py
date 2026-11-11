@@ -120,10 +120,15 @@ class SingleFileReader(ArchiveReader):
     format = FormatId.GZ
 
     def __init__(
-        self, path: Path, *, password: str | None = None, name_encoding: str | None = None
+        self,
+        path: Path,
+        *,
+        password: str | None = None,
+        name_encoding: str | None = None,
+        source: BinaryIO | None = None,
     ) -> None:
-        super().__init__(path, password=password, name_encoding=name_encoding)
-        with streams.open_source(self.path) as fh:
+        super().__init__(path, password=password, name_encoding=name_encoding, source=source)
+        with streams.open_input(self.path, self.source) as fh:
             head = fh.read(8)
             self._codec = streams.sniff_codec(head)
             if self._codec not in _FORMAT_OF_CODEC:
@@ -135,10 +140,7 @@ class SingleFileReader(ArchiveReader):
                 fh.seek(0)
                 member_name, self._mtime = read_gzip_header(fh)
         self._name = member_name or output_name(self.origin.name, self._codec)
-        try:
-            self._packed = os.stat(self.path).st_size
-        except OSError as exc:
-            raise translate_oserror(exc, f"cannot read {self.path.name}") from exc
+        self._packed = streams.input_size(self.path, self.source)
 
     def entries(self) -> list[ArchiveEntry]:
         mtime = datetime.fromtimestamp(self._mtime, tz=UTC) if self._mtime else None
@@ -154,7 +156,7 @@ class SingleFileReader(ArchiveReader):
         ]
 
     def _open_entry(self, entry: ArchiveEntry) -> _Stream:
-        fh = streams.open_source(self.path)
+        fh = streams.open_input(self.path, self.source)
         try:
             inner = streams.open_decompressed(fh, self._codec)
         except BaseException:
@@ -177,22 +179,23 @@ class SingleFileReader(ArchiveReader):
         return []
 
     def info(self) -> ArchiveInfo:
-        total = -1
+        total: int | None = None
         if self._codec == streams.GZ and self._packed >= 18:
-            with streams.open_source(self.path) as fh:
+            with streams.open_input(self.path, self.source) as fh:
                 fh.seek(-4, os.SEEK_END)
                 total = struct.unpack("<I", fh.read(4))[0]  # modulo 2**32, as gzip stores it
         return ArchiveInfo(
             path=self.path,
             format=self.format,
             entries_count=1,
-            total_size=total,
+            total_size=total or 0,
             compressed_size=self._packed,
             encrypted=False,
+            total_size_known=total is not None,
         )
 
     def close(self) -> None:
-        return None
+        self.run_cleanups()
 
 
 class SingleFileWriter(ArchiveWriter):

@@ -9,6 +9,7 @@ import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from .errors import IOFailure, UnsupportedFormat, UsageError
 from .model import FormatId
@@ -79,19 +80,40 @@ def _first_block_from_file(path: Path, fmt: FormatId) -> bytes:
     block arrived, which can be far larger than ``HEAD_SIZE``."""
     try:
         with path.open("rb") as fh:
-            if fmt is FormatId.GZ:
-                return gzip.GzipFile(fileobj=fh).read(_TAR_BLOCK)
-            if fmt is FormatId.BZ2:
-                return bz2.BZ2File(fh).read(_TAR_BLOCK)
-            if fmt is FormatId.XZ:
-                return lzma.LZMAFile(fh).read(_TAR_BLOCK)
-            if fmt is FormatId.ZST:
-                import zstandard
+            return _first_block_from_stream(fh, fmt)
+    except OSError:
+        return b""
 
-                return zstandard.ZstdDecompressor().stream_reader(fh).read(_TAR_BLOCK)
+
+def _first_block_from_stream(fh: BinaryIO, fmt: FormatId) -> bytes:
+    try:
+        if fmt is FormatId.GZ:
+            return gzip.GzipFile(fileobj=fh).read(_TAR_BLOCK)
+        if fmt is FormatId.BZ2:
+            return bz2.BZ2File(fh).read(_TAR_BLOCK)
+        if fmt is FormatId.XZ:
+            return lzma.LZMAFile(fh).read(_TAR_BLOCK)
+        if fmt is FormatId.ZST:
+            import zstandard
+
+            reader = zstandard.ZstdDecompressor().stream_reader(fh, closefd=False)
+            return bytes(reader.read(_TAR_BLOCK))
     except Exception:
         return b""
     return b""
+
+
+def sniff_stream(fh: BinaryIO) -> FormatId | None:
+    """Like :func:`sniff`, for a seekable file object read from its start (a multi-part set);
+    decompresses as far as needed to recognise a TAR inside bz2 or zstd. The position is
+    left undefined."""
+    fh.seek(0)
+    fmt = sniff(fh.read(HEAD_SIZE))
+    if fmt in _SINGLE_TO_TAR:
+        fh.seek(0)
+        if looks_like_tar_header(_first_block_from_stream(fh, fmt)):
+            fmt = _SINGLE_TO_TAR[fmt]
+    return fmt
 
 
 def sniff(head: bytes) -> FormatId | None:

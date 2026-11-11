@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 
 from ..jobs import JobContext
-from ..model import EntryType, OperationReport
-from ._input import ensure_password, open_input_reader
+from ..model import OperationReport
+from ._input import ensure_password, open_input_reader, progress_total
 
 
 def test_archive(
@@ -27,11 +27,7 @@ def test_archive(
         entries = reader.entries()
         ensure_password(reader, entries, ctx)
         entries = reader.entries()
-        ctx.begin(
-            "test",
-            bytes_total=sum(e.size for e in entries if e.type is EntryType.FILE),
-            entries_total=len(entries),
-        )
+        ctx.begin("test", bytes_total=progress_total(entries), entries_total=len(entries))
         issues = [*reader.issues(), *reader.test(ctx)]
         ctx.finish()
     bad = len({i.entry for i in issues if i.severity == "error"})

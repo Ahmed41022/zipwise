@@ -16,7 +16,6 @@ from helpers.trees import BASE_MTIME, SHAPES, make_tree, snapshot
 from zipwise import safety
 from zipwise.errors import (
     Cancelled,
-    CorruptArchive,
     IOFailure,
     UnsupportedFormat,
     UsageError,
@@ -317,15 +316,16 @@ def test_declared_size_larger_than_free_space_fails_before_writing(
     assert not dest.exists()
 
 
-def test_corrupt_entry_aborts_and_removes_its_partial_file(tmp_path: Path) -> None:
+def test_corrupt_zip_entry_is_skipped_and_its_partial_file_removed(tmp_path: Path) -> None:
     out = write_raw_zip(
         tmp_path / "c.zip",
         [file_entry("good.txt", b"fine"), file_entry("bad.txt", b"x" * 100, declared_crc=1)],
     )
     dest = tmp_path / "dest"
-    with pytest.raises(CorruptArchive):
-        extract_archive(out, dest)
+    report = extract_archive(out, dest)
     assert tree_files(dest) == ["good.txt"]
+    assert [(i.code, i.entry) for i in report.issues] == [("corrupt-entry", "bad.txt")]
+    assert (report.ok, report.exit_code, report.entries_skipped) == (False, 4, 1)
 
 
 def test_resume_without_a_journal_is_a_plain_extraction(tmp_path: Path, archive: Path) -> None:

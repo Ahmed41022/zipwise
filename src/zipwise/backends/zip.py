@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType, TracebackType
 from typing import Any, BinaryIO
 
+from .. import encoding
 from ..encoding import EncodingGuess, decode_name_strict, detect_names
 from ..errors import (
     BackendUnavailable,
@@ -371,7 +372,7 @@ class ZipReader(ArchiveReader):
         if self.name_encoding is not None:
             self._guess = EncodingGuess(self.name_encoding, 1.0)
         elif pending:
-            self._guess = detect_names(pending)
+            self._guess = detect_names(pending, hint_locale=encoding.system_locale_hint())
         else:
             self._guess = EncodingGuess("utf-8", 1.0)
         out: list[tuple[bytes | None, str]] = []
@@ -470,7 +471,8 @@ class ZipReader(ArchiveReader):
             fh.read(1)
 
     def extract(self, entries: Sequence[ArchiveEntry], sink: EntrySink, ctx: JobContext) -> None:
-        self.pull_extract(entries, sink, ctx, self._open_entry)  # type: ignore[arg-type]
+        # entries are independent in a ZIP: a damaged one is reported and the rest extracted
+        self.pull_extract(entries, sink, ctx, self._open_entry, skip_corrupt=True)  # type: ignore[arg-type]
 
     def test(self, ctx: JobContext) -> list[Issue]:
         issues: list[Issue] = []

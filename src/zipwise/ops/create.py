@@ -14,6 +14,7 @@ from ..model import CreateOptions, EntryType, Issue, OperationReport
 from ..registry import capability, get_reader, get_writer, get_writer_class
 from ..smart import should_store
 from ..split import manifest_name, recipient_notes, split_file
+from ._input import progress_total
 
 
 def _verify_created(
@@ -27,11 +28,7 @@ def _verify_created(
             raise CorruptArchive(
                 f"Verification failed: wrote {expected_entries} entries but found {len(entries)}"
             )
-        ctx.begin(
-            "verify",
-            bytes_total=sum(e.size for e in entries if e.type is EntryType.FILE),
-            entries_total=len(entries),
-        )
+        ctx.begin("verify", bytes_total=progress_total(entries), entries_total=len(entries))
         problems = [i for i in reader.test(ctx) if i.severity == "error"]
     if problems:
         first = problems[0]

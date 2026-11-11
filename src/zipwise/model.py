@@ -47,6 +47,12 @@ class ConflictAction(Enum):
 Level = Literal["fast", "normal", "best"] | int
 Severity = Literal["info", "warning", "error"]
 
+# Issue codes for damaged entry data. An error issue with one of them makes the report's
+# exit code 4 (corrupt archive) rather than 1. "corrupt-entry": an entry skipped during
+# extraction because its data was damaged; "corrupt-archive": a failed check in ``test``.
+CORRUPT_ENTRY = "corrupt-entry"
+CORRUPT_ISSUE_CODES: frozenset[str] = frozenset({CORRUPT_ENTRY, "corrupt-archive"})
+
 
 @dataclass(frozen=True)
 class ArchiveEntry:
@@ -90,13 +96,16 @@ class ArchiveInfo:
     multipart: bool = False
     comment: str = ""
     issues: tuple[Issue, ...] = ()
+    # False when the uncompressed size is not recorded (single-file .bz2/.xz/.zst): then
+    # ``total_size`` is 0 and ``to_dict()`` gives ``"total_size": null``.
+    total_size_known: bool = True
 
     def to_dict(self) -> dict[str, object]:
         return {
             "path": str(self.path),
             "format": self.format.value,
             "entries_count": self.entries_count,
-            "total_size": self.total_size,
+            "total_size": self.total_size if self.total_size_known else None,
             "compressed_size": self.compressed_size,
             "encrypted": self.encrypted,
             "name_encoding": self.name_encoding,
@@ -156,7 +165,10 @@ class OperationReport:
 
     @property
     def exit_code(self) -> ExitCode:
-        """0 when clean, 1 when anything was skipped, blocked or flagged."""
+        """0 when clean, 4 when an entry's data was damaged (see ``CORRUPT_ISSUE_CODES``),
+        1 when anything else was skipped, blocked or flagged."""
+        if any(i.severity == "error" and i.code in CORRUPT_ISSUE_CODES for i in self.issues):
+            return ExitCode.CORRUPT
         if any(i.severity in ("warning", "error") for i in self.issues):
             return ExitCode.WARNINGS
         return ExitCode.OK

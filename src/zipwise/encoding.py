@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import locale
 import math
+import sys
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -457,23 +458,68 @@ def _sample(raws: list[bytes]) -> list[bytes]:
     return [unique[int(i * step)] for i in range(_MAX_SAMPLE)]
 
 
+def _codepage_name(text: str) -> str | None:
+    """``1256`` / ``cp1256`` / ``windows-1256`` / ``ibm866`` -> a candidate name, else None."""
+    for prefix in ("windows_", "windows", "cp", "ibm"):
+        if text.startswith(prefix) and text[len(prefix) :].isdigit():
+            text = text[len(prefix) :]
+            break
+    if not text.isdigit():
+        return text if text in CANDIDATES else None
+    name = _CODEPAGE_ALIASES.get(int(text), f"cp{int(text)}")
+    return name if name in CANDIDATES else None
+
+
 def _hint_order(hint: str | None) -> tuple[str, ...]:
+    """Candidates a hint prefers, best first. ``hint`` is a locale (``ar_EG``, ``he_IL.UTF-8``),
+    a code page (``cp1255``, ``1251``) or a comma-separated list of those."""
     if not hint:
         return ()
-    text = hint.strip().lower().replace("-", "_").split(".")[0].split("@")[0]
-    if text in CANDIDATES:
-        return (text,)
-    if text in _LOCALE_PREFERENCE:
-        return _LOCALE_PREFERENCE[text]
-    return _LOCALE_PREFERENCE.get(text.split("_")[0], ())
+    order: list[str] = []
+    for item in hint.split(","):
+        text = item.strip().lower().replace("-", "_").split("@")[0]
+        page = _codepage_name(text)
+        if page is not None:
+            found: tuple[str, ...] = (page,)
+        else:
+            text = text.split(".")[0]
+            found = _LOCALE_PREFERENCE.get(text) or _LOCALE_PREFERENCE.get(text.split("_")[0], ())
+        order.extend(enc for enc in found if enc not in order)
+    return tuple(order)
+
+
+# Windows code pages that map to a candidate other than cpNNN. 862 (Hebrew OEM) has no
+# candidate of its own; the Hebrew ANSI page is the closest useful preference.
+_CODEPAGE_ALIASES = {936: "gbk", 950: "big5", 949: "cp949", 932: "cp932", 862: "cp1255"}
+
+
+def _windows_code_pages() -> list[str]:
+    """The ANSI then the OEM code page of this Windows session (old ZIP tools used OEM)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        return [str(kernel32.GetACP()), str(kernel32.GetOEMCP())]
+    except (AttributeError, OSError):
+        return []
 
 
 def system_locale_hint() -> str | None:
-    """The user's locale (for example ``ar_EG``), usable as ``hint_locale``."""
+    """Hint for :func:`detect_names` describing this system, or None when nothing useful is
+    known: on Windows the ANSI and OEM code pages (``"1256,720"``), elsewhere the locale name
+    (``"ar_EG"``). It only ever decides between near-tied candidates."""
+    pages = _windows_code_pages()
+    if pages and pages != ["65001", "65001"]:
+        return ",".join(pages)
     try:
-        return locale.getlocale()[0]
+        name = locale.getlocale(locale.LC_CTYPE)[0] or locale.getlocale()[0]
     except (ValueError, TypeError):
+        name = None
+    if not name or name.upper() in ("C", "POSIX"):
         return None
+    return name
 
 
 def _is_strict_utf8(raw: bytes) -> bool:

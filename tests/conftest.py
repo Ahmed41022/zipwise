@@ -22,6 +22,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         item.add_marker(skip)
 
 
+@pytest.fixture(autouse=True)
+def _no_system_locale_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Name detection must not depend on the machine running the tests; tests that need a
+    locale hint patch ``zipwise.encoding.system_locale_hint`` themselves."""
+    monkeypatch.setattr("zipwise.encoding.system_locale_hint", lambda: None)
+
+
 @pytest.fixture
 def ctx() -> JobContext:
     return JobContext()

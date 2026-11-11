@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.builders import file_entry, write_raw_zip
+from helpers.builders import compress_bytes, file_entry, tar_bytes, tar_file, write_raw_zip
 from helpers.jobs import stepping_context
 from helpers.names import extracted_files
 from helpers.trees import random_bytes
@@ -277,7 +277,7 @@ def test_journal_for_another_archive_name_is_not_used(tmp_path: Path, archive: P
     assert journal_for(dest).exists()  # set.zip's own journal is still there
 
 
-def test_error_mid_extraction_keeps_the_journal(tmp_path: Path) -> None:
+def test_damaged_zip_entry_keeps_the_journal_of_the_finished_files(tmp_path: Path) -> None:
     entries = [
         file_entry("ok1.txt", b"1" * 100),
         file_entry("ok2.txt", b"2" * 100),
@@ -286,10 +286,24 @@ def test_error_mid_extraction_keeps_the_journal(tmp_path: Path) -> None:
     ]
     archive = write_raw_zip(tmp_path / "bad.zip", entries)
     dest = tmp_path / "out"
+    report = extract_archive(archive, dest, PLAIN_RUN)  # ZIP entries are independent
+    assert not report.ok and report.exit_code == 4
+    data = json.loads(journal_for(dest, "bad.zip").read_text(encoding="utf-8"))
+    assert [e["name"] for e in data["entries"]] == ["ok1.txt", "ok2.txt", "after.txt"]
+
+
+def test_error_mid_stream_extraction_keeps_the_journal(tmp_path: Path) -> None:
+    members = [tar_file(f"ok{i}.bin", random_bytes(i, 20_000)) for i in range(1, 4)]
+    whole = compress_bytes(tar_bytes(members), "gz")
+    archive = tmp_path / "cut.tar.gz"
+    archive.write_bytes(whole[: len(whole) * 3 // 4])
+    dest = tmp_path / "out"
     with pytest.raises(CorruptArchive):
         extract_archive(archive, dest, PLAIN_RUN)
-    data = json.loads(journal_for(dest, "bad.zip").read_text(encoding="utf-8"))
-    assert [e["name"] for e in data["entries"]] == ["ok1.txt", "ok2.txt"]
+    data = json.loads(journal_for(dest, "cut.tar.gz").read_text(encoding="utf-8"))
+    done = [e["name"] for e in data["entries"]]
+    assert done and "ok3.bin" not in done
+    assert sorted(p.name for p in dest.iterdir() if not p.name.startswith(".")) == done
 
 
 # --- multi-part input and fingerprint -------------------------------------------------------

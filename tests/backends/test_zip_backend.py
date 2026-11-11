@@ -221,9 +221,11 @@ def test_flipped_data_byte_is_detected_by_the_checksum(tmp_path: Path) -> None:
     raw = bytearray(out.read_bytes())
     raw[raw.index(b"payload-") + 20] ^= 0x01
     out.write_bytes(bytes(raw))
-    with pytest.raises(CorruptArchive):
-        extract_archive(out, tmp_path / "dest")
-    assert not [p for p in (tmp_path / "dest").rglob("*") if p.is_file()]
+    report = extract_archive(out, tmp_path / "dest")
+    assert [(i.code, i.entry) for i in report.issues] == [("corrupt-entry", "a.txt")]
+    assert report.exit_code == 4
+    files = [p for p in (tmp_path / "dest").rglob("*") if p.is_file()]
+    assert all(p.name.endswith(".zipwise-resume.json") for p in files)
 
 
 def test_empty_zip_has_no_entries_and_extracts_cleanly(tmp_path: Path) -> None:

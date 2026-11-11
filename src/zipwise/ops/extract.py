@@ -17,7 +17,7 @@ from typing import BinaryIO, cast
 
 from ..backends.base import ArchiveReader
 from ..conflicts import ConflictResolver, unique_path
-from ..errors import SafetyViolation, UsageError
+from ..errors import SafetyViolation, UsageError, ZipwiseError
 from ..fsutil import (
     apply_mode,
     clear_readonly,
@@ -32,6 +32,7 @@ from ..fsutil import (
 )
 from ..jobs import JobContext
 from ..model import (
+    CORRUPT_ENTRY,
     ArchiveEntry,
     ConflictAction,
     EntryType,
@@ -311,6 +312,11 @@ class _ExtractSink:
             self.journal.mark_done(entry.index, meta.name, out.written)
         self.ctx.entry_done()
 
+    def entry_failed(self, entry: ArchiveEntry, error: ZipwiseError) -> None:
+        """A damaged entry the reader skipped; its partial file was already removed."""
+        self._issue("error", CORRUPT_ENTRY, entry.name, error.message)
+        self._skip()
+
     # -- non-file entries ------------------------------------------------------------------
 
     def _make_dir(self, target: Path, entry: ArchiveEntry) -> None:
@@ -411,19 +417,21 @@ def extract_reader(
     started = time.monotonic()
     destination = Path(os.path.abspath(dest))
 
-    entries = reader.entries()
+    # A damaged stream (truncated .tar.gz) still yields the files before the damage; the
+    # reader raises CorruptArchive once it gets there.
+    entries = reader.extractable_entries()
     selected = _select(entries, options)
     ensure_password(reader, selected, ctx)
-    original = {e.index: e for e in reader.entries()}
+    original = {e.index: e for e in reader.extractable_entries()}
     selected = _select(list(original.values()), options)
 
     plan = plan_extraction(selected, destination, options.policy)  # raises before any write
     ensure_writable_dir(destination)
     insensitive = is_case_insensitive(destination) if case_insensitive is None else case_insensitive
     total = plan.total_bytes
+    unknown = any(p.entry.type is EntryType.FILE and p.entry.size < 0 for p in plan.planned)
     max_total = options.policy.max_total_bytes
     if max_total is None:
-        unknown = any(p.entry.size < 0 for p in plan.planned)
         max_total = free_space(destination) if unknown else total
     budget = ByteBudget(max_total, options.policy.max_entry_bytes)
     journal, journal_issues = ResumeJournal.start(
@@ -441,14 +449,18 @@ def extract_reader(
     )
     sink.issues.extend(journal_issues)
     sink.issues.extend(reader.issues())
-    ctx.begin("extract", bytes_total=total, entries_total=len(plan.planned))
+    # 0 means "unknown": a partial total would let progress run past 100 %
+    ctx.begin("extract", bytes_total=0 if unknown else total, entries_total=len(plan.planned))
     try:
         reader.extract([original[p.entry.index] for p in plan.planned], sink, ctx)
         sink.finish()
     except BaseException:
         journal.flush()
         raise
-    journal.remove()
+    if any(i.code == CORRUPT_ENTRY for i in sink.issues):
+        journal.flush()  # a later --resume (from a repaired copy) skips the finished files
+    else:
+        journal.remove()
     if sink.resumed:
         sink.issues.append(
             Issue(

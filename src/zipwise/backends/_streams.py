@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import bz2
 import gzip
+import io
 import lzma
+import os
 import struct
 import zlib
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 from ..errors import BackendUnavailable, CorruptArchive, UsageError, ZipwiseError
 from ..fsutil import translate_oserror
@@ -145,6 +147,81 @@ def open_decompressed(fh: BinaryIO, codec: str) -> Any:
     if codec == ZST:
         return ZstdReader(fh)
     return fh
+
+
+class SharedView(io.RawIOBase):
+    """Read-only view of a shared seekable ``source`` with its own position, starting at 0.
+
+    Several passes over one archive (list, then extract) each get a fresh view, so none of
+    them depends on where another left the shared position. Closing the view leaves
+    ``source`` open: whoever supplied it closes it."""
+
+    def __init__(self, source: BinaryIO) -> None:
+        super().__init__()
+        self._source = source
+        self._pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._pos + offset
+        elif whence == io.SEEK_END:
+            target = source_size(self._source) + offset
+        else:
+            raise ValueError(f"invalid whence ({whence})")
+        if target < 0:
+            raise ValueError("negative seek position")
+        self._pos = target
+        return target
+
+    def readinto(self, buffer: bytearray | memoryview) -> int:  # type: ignore[override]
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        view = memoryview(buffer).cast("B")
+        self._source.seek(self._pos)
+        data = self._source.read(len(view))
+        view[: len(data)] = data
+        self._pos += len(data)
+        return len(data)
+
+
+def source_size(source: BinaryIO) -> int:
+    """Size of a seekable file object; its position is left unchanged."""
+    here = source.tell()
+    try:
+        return source.seek(0, io.SEEK_END)
+    finally:
+        source.seek(here)
+
+
+def input_size(path: Path, source: BinaryIO | None) -> int:
+    """Size of the archive: of ``source`` when given, otherwise of the file at ``path``."""
+    if source is not None:
+        return source_size(source)
+    try:
+        return os.stat(path).st_size
+    except OSError as exc:
+        raise translate_oserror(exc, f"cannot read {path.name}") from exc
+
+
+def open_input(path: Path, source: BinaryIO | None) -> BinaryIO:
+    """A fresh read handle on the archive at position 0: a view of ``source`` when given
+    (closing it leaves ``source`` open), otherwise the file at ``path``."""
+    if source is not None:
+        return cast(BinaryIO, io.BufferedReader(SharedView(source)))
+    return open_source(path)
 
 
 def open_source(path: Path) -> BinaryIO:

@@ -139,8 +139,10 @@ def test_info_reports_the_gzip_trailer_size_and_unknown_for_others(tmp_path: Pat
     assert archive_info(gz).total_size == len(PAYLOAD)
     assert archive_info(gz).format is FormatId.GZ
     xz = write_single(tmp_path / "x.xz", "xz")
-    assert archive_info(xz).total_size == -1
-    assert archive_info(xz).entries_count == 1
+    info = archive_info(xz)
+    assert (info.total_size, info.total_size_known) == (0, False)
+    assert info.to_dict()["total_size"] is None
+    assert info.entries_count == 1
 
 
 @pytest.mark.parametrize("codec", CODECS)

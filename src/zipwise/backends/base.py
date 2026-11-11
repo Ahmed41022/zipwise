@@ -9,6 +9,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Protocol
 
+from ..errors import CorruptArchive
 from ..fsutil import copy_stream
 from ..jobs import JobContext
 from ..model import ArchiveEntry, ArchiveInfo, CreateOptions, FormatId, Issue
@@ -74,6 +75,13 @@ class ArchiveReader(ABC):
     @abstractmethod
     def close(self) -> None: ...
 
+    def extractable_entries(self) -> list[ArchiveEntry]:
+        """Entries for extraction. Like :meth:`entries`, except that a stream format whose
+        listing breaks off (truncated or damaged data) returns the entries read before the
+        damage instead of raising, so they can still be extracted; :meth:`extract` then raises
+        ``CorruptArchive`` when it reaches the damage."""
+        return self.entries()
+
     def issues(self) -> list[Issue]:
         """Problems found while reading (for example names that needed a fallback decoding).
         Meaningful after :meth:`entries` has been called."""
@@ -97,8 +105,16 @@ class ArchiveReader(ABC):
         sink: EntrySink,
         ctx: JobContext,
         open_entry: Callable[[ArchiveEntry], BinaryIO],
+        *,
+        skip_corrupt: bool = False,
     ) -> None:
-        """Helper for pull-style formats: turns "open the entry's stream" into sink calls."""
+        """Helper for pull-style formats: turns "open the entry's stream" into sink calls.
+
+        With ``skip_corrupt`` (random-access formats, where one entry's damage does not affect
+        the others) a ``CorruptArchive`` for one entry is handed to the sink's optional
+        ``entry_failed(entry, error)`` after its partial output was discarded, and extraction
+        goes on. Sinks without that method get the exception as before."""
+        report_failure = getattr(sink, "entry_failed", None) if skip_corrupt else None
         for entry in entries:
             ctx.raise_if_cancelled()
             ctx.set_entry(entry.name)
@@ -106,12 +122,19 @@ class ArchiveReader(ABC):
             if out is None:
                 continue
             ok = False
+            failure: CorruptArchive | None = None
             try:
                 with open_entry(entry) as src:
                     copy_stream(src, out, ctx)
                 ok = True
+            except CorruptArchive as exc:
+                if report_failure is None:
+                    raise
+                failure = exc
             finally:
                 sink.close(entry, out, ok)
+            if failure is not None and report_failure is not None:
+                report_failure(entry, failure)
 
     def __enter__(self) -> ArchiveReader:
         return self

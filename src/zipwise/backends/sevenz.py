@@ -47,6 +47,7 @@ from ..model import (
     Issue,
 )
 from ..smart import resolve_level
+from . import _streams as streams
 from .base import ArchiveReader, ArchiveWriter, EntrySink
 
 _AES_METHOD = b"\x06\xf1\x07\x01"
@@ -163,12 +164,18 @@ class _SinkSession:
         self.ctx = ctx
         self.streams: list[_SinkIO] = []
         self.current: str | None = None
+        self.key_proven = False
+        self._previous: ArchiveEntry | None = None
 
     def create(self, index: int) -> Py7zIO:
         entry = self.by_index[index]
         self.ctx.raise_if_cancelled()
         self.ctx.set_entry(entry.name)
         self.current = entry.name
+        # py7zr asks for the next stream only after the previous one passed its CRC check
+        if self._previous is not None and self._previous.encrypted:
+            self.key_proven = True
+        self._previous = entry
         out = self.sink.open(entry)
         if out is None:
             return _Discard(self.ctx)
@@ -195,9 +202,14 @@ class SevenZipReader(ArchiveReader):
     format = FormatId.SEVENZ
 
     def __init__(
-        self, path: Path, *, password: str | None = None, name_encoding: str | None = None
+        self,
+        path: Path,
+        *,
+        password: str | None = None,
+        name_encoding: str | None = None,
+        source: BinaryIO | None = None,
     ) -> None:
-        super().__init__(path, password=password, name_encoding=name_encoding)
+        super().__init__(path, password=password, name_encoding=name_encoding, source=source)
         self._fh: BinaryIO | None = None
         self._sz: Any = None
         self._entries: list[ArchiveEntry] | None = None
@@ -216,14 +228,9 @@ class SevenZipReader(ArchiveReader):
     # -- opening ---------------------------------------------------------------------------
 
     def _open(self) -> None:
-        self.close()
+        self._release()
         self._entries = None
-        try:
-            fh = self.path.open("rb")
-        except FileNotFoundError as exc:
-            raise UsageError(f"File not found: {self.path}") from exc
-        except OSError as exc:
-            raise translate_oserror(exc, f"cannot read {self.path.name}") from exc
+        fh = streams.open_input(self.path, self.source)  # a shared source restarts at 0
         try:
             # A file object (not a path) also stops py7zr from extracting folders in threads.
             self._sz = py7zr.SevenZipFile(fh, "r", password=self._password or None)
@@ -245,7 +252,10 @@ class SevenZipReader(ArchiveReader):
         except Exception as exc:
             fh.close()
             if self._password:  # an encrypted header decrypts to garbage with a wrong password
-                raise WrongPassword("Wrong password for this archive") from exc
+                raise WrongPassword(
+                    "Wrong password, or the archive is damaged",
+                    hint="Check the password. If it is right, the archive is damaged.",
+                ) from exc
             raise CorruptArchive(f"Cannot read {self.path.name}: {exc}") from exc
         self._fh = fh
 
@@ -328,7 +338,11 @@ class SevenZipReader(ArchiveReader):
     def _encrypted(self) -> bool:
         return any(e.encrypted for e in self.entries())
 
-    def _translate(self, exc: BaseException, name: str | None = None) -> ZipwiseError:
+    def _translate(
+        self, exc: BaseException, name: str | None = None, *, key_proven: bool = False
+    ) -> ZipwiseError:
+        """``key_proven``: an encrypted entry was already decoded with a matching CRC in this
+        pass, so the password is right and a later failure can only be damage."""
         if isinstance(exc, ZipwiseError):
             return exc
         what = f"{name!r}" if name else self.path.name
@@ -338,9 +352,13 @@ class SevenZipReader(ArchiveReader):
             return UnsupportedFormat(f"{what} uses an unsupported compression method")
         if isinstance(exc, OSError) and exc.errno is not None:
             return translate_oserror(exc, f"cannot read {what}")
-        if self._password and self._encrypted():
-            # A wrong key decrypts to garbage, which only shows up as a decoding or CRC error.
-            return WrongPassword(f"Wrong password, or damaged data in {what}")
+        if self._password and self._encrypted() and not key_proven:
+            # A wrong key decrypts to garbage, which only shows up as a decoding or CRC error,
+            # exactly like damaged data: 7z gives no cheap way to tell the two apart.
+            return WrongPassword(
+                f"Wrong password, or damaged data in {what}",
+                hint="Check the password. If it is right, the archive is damaged.",
+            )
         return CorruptArchive(f"{what} is damaged: {exc}")
 
     # -- extraction ------------------------------------------------------------------------
@@ -365,7 +383,7 @@ class SevenZipReader(ArchiveReader):
             session.abandon()
             if isinstance(exc, ZipwiseError | KeyboardInterrupt | SystemExit):
                 raise
-            raise self._translate(exc, session.current) from exc
+            raise self._translate(exc, session.current, key_proven=session.key_proven) from exc
 
     def check_password(self) -> None:
         probe = [e for e in self.entries() if e.encrypted and e.type is EntryType.FILE and e.size]
@@ -388,9 +406,12 @@ class SevenZipReader(ArchiveReader):
             if entry.type is not EntryType.FILE:
                 ctx.entry_done()
         current: list[ArchiveEntry] = []
+        proven: list[bool] = [False]
 
         def make(index: int) -> Py7zIO:
             ctx.raise_if_cancelled()
+            if current and current[0].encrypted:  # the previous entry passed its CRC check
+                proven[0] = True
             current[:] = [files[index]]
             ctx.set_entry(files[index].name)
             return _CountingIO(ctx)
@@ -402,7 +423,7 @@ class SevenZipReader(ArchiveReader):
             raise
         except Exception as exc:
             name = current[0].name if current else None
-            error = self._translate(exc, name)
+            error = self._translate(exc, name, key_proven=proven[0])
             if isinstance(error, WrongPassword | PasswordRequired | IOFailure):
                 raise error from exc
             return [Issue("error", error.code, name, error.message)]
@@ -413,7 +434,7 @@ class SevenZipReader(ArchiveReader):
         try:
             packed = sum(self._sz.header.main_streams.packinfo.packsizes)
         except (AttributeError, TypeError):
-            packed = os.stat(self.path).st_size
+            packed = streams.input_size(self.path, self.source)
         return ArchiveInfo(
             path=self.path,
             format=FormatId.SEVENZ,
@@ -424,6 +445,13 @@ class SevenZipReader(ArchiveReader):
         )
 
     def close(self) -> None:
+        try:
+            self._release()
+        finally:
+            self.run_cleanups()
+
+    def _release(self) -> None:
+        """Close py7zr and the read handle; a shared ``source`` itself stays open."""
         sz, fh = self._sz, self._fh
         self._sz = self._fh = None
         try:
