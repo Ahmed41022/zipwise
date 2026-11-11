@@ -128,11 +128,21 @@ def test_verification_phase_is_reported(tmp_path: Path) -> None:
     assert last_compress.entries_done == last_compress.entries_total
 
 
-def test_split_size_is_not_available_yet(tmp_path: Path) -> None:
+@pytest.mark.parametrize("size", [0, -5])
+def test_bad_split_size_is_a_usage_error(tmp_path: Path, size: int) -> None:
     tree = make_tree(tmp_path / "src" / "t", SHAPES["simple"])
-    with pytest.raises(UsageError, match="not available yet"):
-        create_archive([tree], tmp_path / "t.zip", CreateOptions(split_size=1000))
+    with pytest.raises(UsageError, match="at least 1 byte"):
+        create_archive([tree], tmp_path / "t.zip", CreateOptions(split_size=size))
     assert leftovers(tmp_path) == ["src"]
+
+
+def test_split_size_creates_numbered_parts_and_no_whole_file(tmp_path: Path) -> None:
+    tree = make_tree(tmp_path / "src" / "t", SHAPES["mixed"])
+    report = create_archive([tree], tmp_path / "t.zip", CreateOptions(split_size=20_000))
+    names = leftovers(tmp_path)
+    assert "t.zip" not in names
+    assert [n for n in names if n.startswith("t.zip.0")][0] == "t.zip.001"
+    assert {p.name for p in report.output_paths} == set(names) - {"src"}
 
 
 @pytest.mark.skipif(not NO_7Z, reason="7z backend exists")

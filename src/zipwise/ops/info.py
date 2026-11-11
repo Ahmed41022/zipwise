@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
-from ..detect import detect
 from ..jobs import JobContext
 from ..model import ArchiveInfo
 from ._input import open_input_reader
@@ -20,8 +19,8 @@ def archive_info(
 ) -> ArchiveInfo:
     if ctx is not None:
         ctx.raise_if_cancelled()
-    path = Path(archive)
-    multipart = detect(path).multipart
-    with open_input_reader(path, password=password, name_encoding=name_encoding) as reader:
+    with open_input_reader(
+        archive, password=password, name_encoding=name_encoding, ctx=ctx
+    ) as reader:
         info = reader.info()
-    return dataclasses.replace(info, multipart=multipart)
+        return dataclasses.replace(info, multipart=reader.multipart)

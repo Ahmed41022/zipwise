@@ -19,5 +19,7 @@ def list_archive(
     """Return every entry. Listing never needs a password: file names are not encrypted."""
     if ctx is not None:
         ctx.raise_if_cancelled()
-    with open_input_reader(archive, password=password, name_encoding=name_encoding) as reader:
+    with open_input_reader(
+        archive, password=password, name_encoding=name_encoding, ctx=ctx
+    ) as reader:
         return reader.entries()

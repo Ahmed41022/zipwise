@@ -358,7 +358,8 @@ ARABIC = "ملف عربي.txt"
 def test_name_encoding_override_decodes_legacy_names(tmp_path: Path) -> None:
     raw = ARABIC.encode("cp1256")
     out = write_raw_zip(tmp_path / "ar.zip", [file_entry(raw)])
-    assert list_archive(out)[0].name != ARABIC  # the default guess cannot know
+    assert list_archive(out)[0].name == ARABIC  # detected without help
+    assert list_archive(out, name_encoding="cp1252")[0].name != ARABIC  # the override wins
     assert list_archive(out, name_encoding="cp1256")[0].name == ARABIC
     extract_archive(out, tmp_path / "dest", ExtractOptions(name_encoding="cp1256"))
     assert (tmp_path / "dest" / ARABIC).exists()

@@ -23,7 +23,7 @@ def test_archive(
     """
     ctx = ctx or JobContext()
     started = time.monotonic()
-    with open_input_reader(archive, password=password) as reader:
+    with open_input_reader(archive, password=password, ctx=ctx) as reader:
         entries = reader.entries()
         ensure_password(reader, entries, ctx)
         entries = reader.entries()
@@ -32,7 +32,7 @@ def test_archive(
             bytes_total=sum(e.size for e in entries if e.type is EntryType.FILE),
             entries_total=len(entries),
         )
-        issues = reader.test(ctx)
+        issues = [*reader.issues(), *reader.test(ctx)]
         ctx.finish()
     bad = len({i.entry for i in issues if i.severity == "error"})
     return OperationReport.build(

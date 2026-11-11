@@ -40,7 +40,12 @@ def archive(tmp_path: Path) -> Path:
 
 
 def tree_files(root: Path) -> list[str]:
-    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+    """Extracted files; the resume journal (a dot file) is not part of the content."""
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file() and not p.name.endswith(".zipwise-resume.json")
+    )
 
 
 # --- conflicts ------------------------------------------------------------------------------
@@ -323,14 +328,16 @@ def test_corrupt_entry_aborts_and_removes_its_partial_file(tmp_path: Path) -> No
     assert tree_files(dest) == ["good.txt"]
 
 
-def test_resume_is_not_available_yet(tmp_path: Path, archive: Path) -> None:
-    with pytest.raises(UsageError, match="not available yet"):
-        extract_archive(archive, tmp_path / "dest", ExtractOptions(resume=True))
-    assert not (tmp_path / "dest").exists()
+def test_resume_without_a_journal_is_a_plain_extraction(tmp_path: Path, archive: Path) -> None:
+    dest = tmp_path / "dest"
+    report = extract_archive(archive, dest, ExtractOptions(resume=True))
+    assert report.ok
+    assert len(tree_files(dest)) == 4
+    assert not [p for p in dest.iterdir() if p.name.startswith(".")]  # no journal left
 
 
 @pytest.mark.parametrize("op", ["extract", "list", "info", "test"])
-def test_multipart_input_is_not_available_yet(tmp_path: Path, archive: Path, op: str) -> None:
+def test_multipart_input_works_for_every_operation(tmp_path: Path, archive: Path, op: str) -> None:
     part = tmp_path / "tree.zip.001"
     shutil.copy(archive, part)
     calls = {
@@ -339,8 +346,13 @@ def test_multipart_input_is_not_available_yet(tmp_path: Path, archive: Path, op:
         "info": lambda: archive_info(part),
         "test": lambda: verify_archive(part),
     }
-    with pytest.raises(UsageError, match="not available yet"):
-        calls[op]()
+    result = calls[op]()
+    if op == "info":
+        assert result.multipart is True  # type: ignore[union-attr]
+    elif op == "list":
+        assert len(result) > 0  # type: ignore[arg-type]
+    else:
+        assert result.ok  # type: ignore[union-attr]
 
 
 def test_long_destination_paths_work(tmp_path: Path) -> None:

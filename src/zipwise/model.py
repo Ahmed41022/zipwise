@@ -89,6 +89,7 @@ class ArchiveInfo:
     encoding_confidence: float | None = None
     multipart: bool = False
     comment: str = ""
+    issues: tuple[Issue, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -102,6 +103,7 @@ class ArchiveInfo:
             "encoding_confidence": self.encoding_confidence,
             "multipart": self.multipart,
             "comment": self.comment,
+            "issues": [i.to_dict() for i in self.issues],
         }
 
 

@@ -65,7 +65,7 @@ def test_backslash_names_are_handled() -> None:
     assert is_compressed_name("dir\\pic.jpg")
 
 
-# --- encoding (minimal detector) ------------------------------------------------------------
+# --- encoding (basics; the scorer is covered in tests/encoding) ---------------------------
 
 
 def test_ascii_names_are_ascii() -> None:
@@ -80,9 +80,9 @@ def test_valid_utf8_is_utf8() -> None:
     assert guess.confidence > 0.5
 
 
-def test_invalid_utf8_falls_back_to_cp437() -> None:
-    guess = detect_names(["café.txt".encode("cp1252")])
-    assert guess.encoding == "cp437"
+def test_invalid_utf8_is_scored_not_assumed() -> None:
+    assert detect_names(["café.txt".encode("cp1252")]).encoding == "cp1252"
+    assert detect_names(["café.txt".encode("cp437")]).encoding == "cp437"
 
 
 def test_empty_name_list_is_ascii() -> None:

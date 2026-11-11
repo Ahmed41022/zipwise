@@ -40,20 +40,12 @@ from ..model import (
     OperationReport,
 )
 from ..naming import CaseClashResolver, sanitize_component
+from ..resume import ResumeJournal
 from ..safety import ByteBudget, ExtractionPlan, PlannedEntry, plan_extraction
 from ._input import ensure_password, open_input_reader
 
 PART_SUFFIX = ".zwpart"
 _REPARSE_POINT = 0x400
-
-
-def _reject_resume(options: ExtractOptions) -> None:
-    """Extension point: resumable extraction (``options.resume``) arrives in a later milestone."""
-    if options.resume:
-        raise UsageError(
-            "Resuming an extraction is not available yet",
-            hint="Run the extraction again without --resume.",
-        )
 
 
 def _norm(name: str) -> str:
@@ -139,7 +131,10 @@ class _ExtractSink:
         *,
         windows: bool,
         case_insensitive: bool,
+        journal: ResumeJournal | None = None,
     ) -> None:
+        self.journal = journal
+        self.resumed = 0
         self.dest = dest
         self.options = options
         self.ctx = ctx
@@ -265,12 +260,29 @@ class _ExtractSink:
         if not self._prepare_parent(target, name):
             self._skip()
             return None
+        if self._already_extracted(planned.entry, target):
+            return None
         final = self._resolve_conflict(target, name)
         if final is None:
             self._skip()
             return None
         self.budget.begin(planned.entry)
         return cast(BinaryIO, _OutFile(final, self.budget))
+
+    def _already_extracted(self, entry: ArchiveEntry, target: Path) -> bool:
+        """Resume: a finished file from the interrupted run is kept as it is."""
+        journal = self.journal
+        if journal is None or not self.options.resume:
+            return False
+        recorded = journal.completed.get(entry.index)
+        if recorded is None or not journal.is_done(entry.index, entry.name, recorded[1], target):
+            return False
+        self.resumed += 1
+        self.done += 1
+        self.bytes_done += recorded[1]
+        self.ctx.advance(recorded[1])
+        self.ctx.entry_done()
+        return True
 
     def close(self, entry: ArchiveEntry, stream: BinaryIO, ok: bool) -> None:
         out = cast(_OutFile, stream)
@@ -295,6 +307,8 @@ class _ExtractSink:
             raise translate_oserror(exc, f"cannot write {out.final.name}") from exc
         self.done += 1
         self.bytes_done += out.written
+        if self.journal is not None:
+            self.journal.mark_done(entry.index, meta.name, out.written)
         self.ctx.entry_done()
 
     # -- non-file entries ------------------------------------------------------------------
@@ -412,6 +426,9 @@ def extract_reader(
         unknown = any(p.entry.size < 0 for p in plan.planned)
         max_total = free_space(destination) if unknown else total
     budget = ByteBudget(max_total, options.policy.max_entry_bytes)
+    journal, journal_issues = ResumeJournal.start(
+        destination, reader.origin, multipart=reader.multipart, resume=options.resume
+    )
     sink = _ExtractSink(
         destination,
         plan,
@@ -420,10 +437,27 @@ def extract_reader(
         budget,
         windows=options.policy.sanitize_windows(),
         case_insensitive=insensitive,
+        journal=journal,
     )
+    sink.issues.extend(journal_issues)
+    sink.issues.extend(reader.issues())
     ctx.begin("extract", bytes_total=total, entries_total=len(plan.planned))
-    reader.extract([original[p.entry.index] for p in plan.planned], sink, ctx)
-    sink.finish()
+    try:
+        reader.extract([original[p.entry.index] for p in plan.planned], sink, ctx)
+        sink.finish()
+    except BaseException:
+        journal.flush()
+        raise
+    journal.remove()
+    if sink.resumed:
+        sink.issues.append(
+            Issue(
+                "info",
+                "resume-skipped",
+                None,
+                f"{sink.resumed} file(s) from the interrupted run were kept as they were",
+            )
+        )
     ctx.finish()
     return OperationReport.build(
         sink.issues,
@@ -443,8 +477,7 @@ def extract_archive(
 ) -> OperationReport:
     """Extract ``archive`` into ``dest`` safely. See the module docstring for the pipeline."""
     options = options or ExtractOptions()
-    _reject_resume(options)
     with open_input_reader(
-        archive, password=options.password, name_encoding=options.name_encoding
+        archive, password=options.password, name_encoding=options.name_encoding, ctx=ctx
     ) as reader:
         return extract_reader(reader, dest, options, ctx)

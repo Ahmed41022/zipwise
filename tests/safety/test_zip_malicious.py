@@ -270,7 +270,11 @@ def test_header_with_wrong_crc_is_corrupt_and_leaves_no_partial_file(tmp_path: P
     entry = file_entry("lie.bin", data, declared_size=1000, level=9)
     with pytest.raises(CorruptArchive):
         run(tmp_path, [file_entry("first.txt", b"ok"), entry])
-    leftovers = [p.name for p in (tmp_path / "dest").rglob("*") if p.is_file()]
+    leftovers = [
+        p.name
+        for p in (tmp_path / "dest").rglob("*")
+        if p.is_file() and not p.name.endswith(".zipwise-resume.json")
+    ]
     assert leftovers == ["first.txt"]
 
 
@@ -436,8 +440,12 @@ def test_cancel_mid_extraction_leaves_no_partial_files(tmp_path: Path) -> None:
 
     with pytest.raises(Cancelled):
         extract_archive(archive, tmp_path / "dest", ExtractOptions(), ctx)
-    files = sorted(p.name for p in (tmp_path / "dest").rglob("*") if p.is_file())
-    assert files == ["first.txt"]
+    files = sorted(
+        p.name
+        for p in (tmp_path / "dest").rglob("*")
+        if p.is_file() and not p.name.endswith(".zipwise-resume.json")
+    )
+    assert files == ["first.txt"]  # the journal for --resume is the only other file
 
 
 def test_safety_violation_is_a_zipwise_error_with_exit_code_5() -> None:

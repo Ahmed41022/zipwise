@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bz2
+import gzip
 import lzma
 import re
 import zlib
@@ -73,6 +74,26 @@ def _first_block(fmt: FormatId, data: bytes) -> bytes:
     return b""
 
 
+def _first_block_from_file(path: Path, fmt: FormatId) -> bytes:
+    """Like ``_first_block`` but reads from the file: bz2 and zstd emit nothing until a whole
+    block arrived, which can be far larger than ``HEAD_SIZE``."""
+    try:
+        with path.open("rb") as fh:
+            if fmt is FormatId.GZ:
+                return gzip.GzipFile(fileobj=fh).read(_TAR_BLOCK)
+            if fmt is FormatId.BZ2:
+                return bz2.BZ2File(fh).read(_TAR_BLOCK)
+            if fmt is FormatId.XZ:
+                return lzma.LZMAFile(fh).read(_TAR_BLOCK)
+            if fmt is FormatId.ZST:
+                import zstandard
+
+                return zstandard.ZstdDecompressor().stream_reader(fh).read(_TAR_BLOCK)
+    except Exception:
+        return b""
+    return b""
+
+
 def sniff(head: bytes) -> FormatId | None:
     """Classify a file from its first bytes. Compressed streams holding a TAR report ``TAR_*``."""
     if head.startswith(_ZIP_MAGICS):
@@ -116,6 +137,8 @@ def detect(path: Path) -> Detection:
     except OSError as exc:
         raise IOFailure(f"Cannot read {path}: {exc.strerror or exc}") from exc
     fmt = sniff(head)
+    if fmt in _SINGLE_TO_TAR and looks_like_tar_header(_first_block_from_file(path, fmt)):
+        fmt = _SINGLE_TO_TAR[fmt]
     if fmt is None:
         raise UnsupportedFormat(
             f"Unrecognised archive format: {path.name}",

@@ -31,11 +31,23 @@ class ArchiveReader(ABC):
     format: FormatId
 
     def __init__(
-        self, path: Path, *, password: str | None = None, name_encoding: str | None = None
+        self,
+        path: Path,
+        *,
+        password: str | None = None,
+        name_encoding: str | None = None,
+        source: BinaryIO | None = None,
     ) -> None:
+        """``source`` is an optional seekable binary file object to read instead of opening
+        ``path`` (used for multi-part archives, see ``zipwise.split.MultiPartFile``). The
+        reader never closes it: whoever supplied it registers a cleanup (:meth:`add_cleanup`)."""
         self.path = Path(path)
+        self.origin = self.path  # the file the user named, even when ``path`` is a temp copy
+        self.source = source
+        self.multipart = False  # set by the opener when the input is a set of numbered parts
         self._password = password
         self.name_encoding = name_encoding
+        self._cleanups: list[Callable[[], None]] = []
 
     @property
     def password(self) -> str | None:
@@ -61,6 +73,20 @@ class ArchiveReader(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
+
+    def issues(self) -> list[Issue]:
+        """Problems found while reading (for example names that needed a fallback decoding).
+        Meaningful after :meth:`entries` has been called."""
+        return []
+
+    def add_cleanup(self, action: Callable[[], None]) -> None:
+        """Run ``action`` once when the reader is released (``with`` exit or run_cleanups)."""
+        self._cleanups.append(action)
+
+    def run_cleanups(self) -> None:
+        pending, self._cleanups = self._cleanups, []
+        for action in reversed(pending):
+            action()
 
     def check_password(self) -> None:  # noqa: B027 - optional hook
         """Raise PasswordRequired / WrongPassword early when the archive is encrypted."""
@@ -96,7 +122,10 @@ class ArchiveReader(ABC):
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.close()
+        try:
+            self.close()
+        finally:
+            self.run_cleanups()
 
 
 class ArchiveWriter(ABC):

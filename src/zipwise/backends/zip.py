@@ -17,7 +17,7 @@ from pathlib import Path
 from types import ModuleType, TracebackType
 from typing import Any, BinaryIO
 
-from ..encoding import EncodingGuess, decode_name, detect_names
+from ..encoding import EncodingGuess, decode_name_strict, detect_names
 from ..errors import (
     BackendUnavailable,
     CorruptArchive,
@@ -266,9 +266,15 @@ class ZipReader(ArchiveReader):
     format = FormatId.ZIP
 
     def __init__(
-        self, path: Path, *, password: str | None = None, name_encoding: str | None = None
+        self,
+        path: Path,
+        *,
+        password: str | None = None,
+        name_encoding: str | None = None,
+        source: BinaryIO | None = None,
     ) -> None:
-        super().__init__(path, password=password, name_encoding=name_encoding)
+        super().__init__(path, password=password, name_encoding=name_encoding, source=source)
+        self._issues: list[Issue] = []
         if name_encoding is not None:
             try:
                 codecs.lookup(name_encoding)
@@ -289,8 +295,9 @@ class ZipReader(ArchiveReader):
         self._entries = None  # encrypted link targets can only be read with the password
 
     def _open(self) -> Any:
+        where: Any = self.source if self.source is not None else self.path
         try:
-            zf: Any = zipfile.ZipFile(self.path, "r")
+            zf: Any = zipfile.ZipFile(where, "r")
         except zipfile.BadZipFile as exc:
             raise CorruptArchive(
                 f"Not a valid ZIP file: {self.path.name} ({exc})",
@@ -303,7 +310,7 @@ class ZipReader(ArchiveReader):
         if any(i.compress_type == _METHOD_AES for i in zf.infolist()):
             zf.close()
             try:
-                zf = _pyzipper().AESZipFile(self.path, "r")
+                zf = _pyzipper().AESZipFile(where, "r")
             except zipfile.BadZipFile as exc:
                 raise CorruptArchive(f"Not a valid ZIP file: {self.path.name} ({exc})") from exc
         return zf
@@ -368,13 +375,30 @@ class ZipReader(ArchiveReader):
         else:
             self._guess = EncodingGuess("utf-8", 1.0)
         out: list[tuple[bytes | None, str]] = []
+        self._issues = []
         for raw, text in raws:
             if text is not None:
                 out.append((raw, text))
-            else:
-                assert raw is not None
-                out.append((raw, decode_name(raw, self._guess.encoding)))
+                continue
+            assert raw is not None
+            decoded = decode_name_strict(raw, self._guess.encoding)
+            if decoded is None:
+                # a mixed archive: this one name does not fit the encoding chosen for the rest
+                decoded = raw.decode("cp437")
+                self._issues.append(
+                    Issue(
+                        "warning",
+                        "name-encoding-fallback",
+                        decoded,
+                        f"name is not valid {self._guess.encoding}; shown as cp437",
+                    )
+                )
+            out.append((raw, decoded))
         return out
+
+    def issues(self) -> list[Issue]:
+        self.entries()
+        return list(self._issues)
 
     @staticmethod
     def _unicode_path(info: zipfile.ZipInfo, raw: bytes) -> str | None:
@@ -476,7 +500,9 @@ class ZipReader(ArchiveReader):
             name_encoding=guess.encoding if guess else None,
             encoding_confidence=guess.confidence if guess else None,
             comment=comment,
+            issues=tuple(self._issues),
         )
 
     def close(self) -> None:
         self._zf.close()
+        self.run_cleanups()

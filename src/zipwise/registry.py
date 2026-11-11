@@ -6,6 +6,7 @@ Adding a format means one backend module plus one row here.
 from __future__ import annotations
 
 import importlib
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -72,7 +73,7 @@ def capability(fmt: FormatId) -> Capability:
 def _load(fmt: FormatId, attr: str | None) -> type:
     cap = CAPABILITIES[fmt]
     if attr is None:
-        raise UnsupportedFormat(f"Zipwise cannot create {fmt.value} archives")
+        raise UnsupportedFormat(f"{fmt.value.upper()} archives can be read but not created")
     try:
         module = importlib.import_module(cap.module)
     except ModuleNotFoundError as exc:
@@ -103,17 +104,31 @@ def get_writer_class(fmt: FormatId) -> type[ArchiveWriter]:
     return cls
 
 
+def reader_accepts_source(fmt: FormatId) -> bool:
+    """True when the backend's reader takes the optional ``source`` file object."""
+    cls = get_reader_class(fmt)
+    return "source" in inspect.signature(cls.__init__).parameters
+
+
 def get_reader(
     path: Path,
     *,
     password: str | None = None,
     name_encoding: str | None = None,
     detection: Detection | None = None,
+    source: BinaryIO | None = None,
 ) -> ArchiveReader:
-    """Detect the format of ``path`` and open it with the matching backend."""
+    """Detect the format of ``path`` and open it with the matching backend.
+
+    With ``source`` (a seekable binary file object holding the archive) the backend reads from
+    it instead of opening ``path``; the backend must declare a ``source`` keyword parameter
+    (check with :func:`reader_accepts_source`).
+    """
     det = detection or detect(path)
     cls = get_reader_class(det.format)
-    return cls(Path(path), password=password, name_encoding=name_encoding)
+    if source is None:
+        return cls(Path(path), password=password, name_encoding=name_encoding)
+    return cls(Path(path), password=password, name_encoding=name_encoding, source=source)
 
 
 def get_writer(

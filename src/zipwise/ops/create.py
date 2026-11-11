@@ -8,20 +8,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..errors import CorruptArchive, UsageError
-from ..fsutil import AtomicFile, translate_oserror, walk_sources
+from ..fsutil import AtomicFile, remove_quietly, translate_oserror, walk_sources
 from ..jobs import JobContext
 from ..model import CreateOptions, EntryType, Issue, OperationReport
 from ..registry import capability, get_reader, get_writer, get_writer_class
 from ..smart import should_store
-
-
-def _reject_split(options: CreateOptions) -> None:
-    """Extension point: split-after-verify (``options.split_size``) arrives in a later milestone."""
-    if options.split_size is not None:
-        raise UsageError(
-            "Splitting into volumes is not available yet",
-            hint="Create the archive without a split size.",
-        )
+from ..split import manifest_name, recipient_notes, split_file
 
 
 def _verify_created(
@@ -46,6 +38,19 @@ def _verify_created(
         raise CorruptArchive(f"Verification failed: {first.entry}: {first.message}")
 
 
+def _split_verified(whole: Path, target: Path, part_size: int, ctx: JobContext) -> list[Path]:
+    """Cut the finished archive into ``target.001...``; returns parts, manifest and notes."""
+    parts = split_file(whole, part_size, ctx, name=target.name, out_dir=target.parent)
+    try:
+        notes = recipient_notes(parts, target.name)
+    except BaseException:
+        for part in parts:
+            remove_quietly(part)
+        remove_quietly(target.parent / manifest_name(target.name))
+        raise
+    return [*parts, target.parent / manifest_name(target.name), notes]
+
+
 def create_archive(
     sources: Sequence[Path | str],
     dest: Path | str,
@@ -60,7 +65,8 @@ def create_archive(
     options = options or CreateOptions()
     ctx = ctx or JobContext()
     started = time.monotonic()
-    _reject_split(options)
+    if options.split_size is not None and options.split_size < 1:
+        raise UsageError(f"Part size must be at least 1 byte, got {options.split_size}")
 
     inputs = [Path(s) for s in sources]
     if not inputs:
@@ -125,7 +131,14 @@ def create_archive(
         if options.verify:
             _verify_created(atomic.temp, len(items) - skipped, options, ctx)
         ctx.raise_if_cancelled()
-        atomic.commit()
+        if options.split_size is None:
+            atomic.commit()
+            outputs = [target]
+        else:
+            # The verified file is cut straight from ``.partial`` and then removed, so a
+            # cancelled split leaves neither parts nor a half-finished archive.
+            outputs = _split_verified(atomic.temp, target, options.split_size, ctx)
+            atomic.discard()
     except BaseException:
         atomic.discard()
         raise
@@ -135,6 +148,6 @@ def create_archive(
         entries_done=len(items) - skipped,
         entries_skipped=skipped,
         bytes_done=written_bytes,
-        output_paths=[target],
+        output_paths=outputs,
         elapsed=time.monotonic() - started,
     )
