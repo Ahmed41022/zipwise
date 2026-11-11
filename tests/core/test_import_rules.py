@@ -60,7 +60,8 @@ def test_cli_and_gui_do_not_import_each_other(path: Path) -> None:
 
 @pytest.mark.parametrize("path", SOURCE_FILES, ids=lambda p: str(p.relative_to(SRC)))
 def test_core_does_not_import_front_ends(path: Path) -> None:
-    if package_of(path) in ("cli", "gui"):
+    # __main__.py is the ``python -m zipwise`` shim: forwarding to the CLI is its whole job.
+    if package_of(path) in ("cli", "gui") or path.name == "__main__.py":
         return
     mods = imported_modules(path)
     bad = [m for m in mods if m.startswith(("zipwise.cli", "zipwise.gui"))]
