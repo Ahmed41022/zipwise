@@ -27,7 +27,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PySide6"]
+# PySide6 6.12.0 on Linux gets reference counts wrong under Python 3.11 and aborts the
+# interpreter; 3.12+ is immune because True, False and None are immortal there.
+gui = [
+    "PySide6>=6.6,<6.12; python_version < '3.12'",
+    "PySide6>=6.6; python_version >= '3.12'",
+]
 dev = ["pytest", "pytest-qt", "ruff", "mypy"]
 
 [project.scripts]

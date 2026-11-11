@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
+import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -8,7 +11,7 @@ import pytest
 from helpers.trees import SHAPES, make_tree
 from zipwise.errors import CorruptArchive, WrongPassword
 from zipwise.gui.worker import JobWorker
-from zipwise.jobs import JobContext
+from zipwise.jobs import JobContext, ProgressEvent
 from zipwise.model import ConflictAction, CreateOptions, ExtractOptions
 from zipwise.ops import create_archive, extract_archive
 from zipwise.ops import test_archive as verify_archive
@@ -222,6 +225,38 @@ def test_cancel_while_waiting_for_an_answer(qtbot, tmp_path: Path, locked_zip: P
     )
     holder.append(worker)
     run(qtbot, worker, "cancelled")
+
+
+def _report_many(count: int) -> Callable[[JobContext], int]:
+    def job(ctx: JobContext) -> int:
+        assert ctx.on_progress is not None
+        for i in range(count):
+            ctx.on_progress(ProgressEvent("extract", f"f{i}", i, count, i, count))
+        return count
+
+    return job
+
+
+def test_progress_arrives_in_order_before_the_result(qtbot) -> None:
+    seen: list[int] = []
+    worker = JobWorker(_report_many(500))
+    worker.progress.connect(lambda event: seen.append(event.bytes_done))
+    assert run(qtbot, worker) == [500]
+    assert seen == list(range(500))
+
+
+def test_qt_bindings_keep_references_to_true_false_and_none(qtbot) -> None:
+    # Guards against broken PySide6 builds: 6.12.0 on Linux with Python 3.11 releases a
+    # reference to True on every signal emitted from the job thread (and to None on many
+    # ordinary calls), and the interpreter aborts once they run out. On 3.12+ these objects
+    # are immortal and the counts do not move.
+    gc.collect()
+    before = [sys.getrefcount(obj) for obj in (True, False, None)]
+    run(qtbot, JobWorker(_report_many(2000)))
+    gc.collect()
+    after = [sys.getrefcount(obj) for obj in (True, False, None)]
+    for name, old, new in zip(("True", "False", "None"), before, after, strict=True):
+        assert new >= old - 50, f"{name}: {old} references before, {new} after"
 
 
 def test_shutdown_cancels_a_running_job(qtbot) -> None:
