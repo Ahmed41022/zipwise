@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QEventLoop
 from PySide6.QtWidgets import QApplication
 
 from ..settings import load_settings
@@ -30,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.archive:
         window.open_archive(Path(args.archive))
     if args.smoke:
+        if window.loading:
+            loop = QEventLoop()
+            window.open_ended.connect(loop.quit)
+            loop.exec()
         app.processEvents()
         window.close()
         app.processEvents()

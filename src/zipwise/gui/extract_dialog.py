@@ -38,6 +38,14 @@ POLICIES = (
 )
 
 
+def encoding_choices() -> list[str]:
+    """Code pages offered for legacy names: UTF-8 first, then the detector's candidates."""
+    names = list(CANDIDATES)
+    if "utf-8" not in names:
+        names.insert(0, "utf-8")
+    return names
+
+
 def policy_text(action: ConflictAction) -> str:
     if action is ConflictAction.SKIP:
         return tr("policy.skip")
@@ -58,12 +66,15 @@ class ExtractDialog(QDialog):
         parent: QWidget | None = None,
         *,
         pick_directory: Callable[[], Path | None] | None = None,
+        name_encoding: str | None = None,
+        password: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings or Settings()
         self._archive = archive
         self._selected = selected or None
         self._pick = pick_directory or self._default_pick_directory
+        self._password = password
         self.setWindowTitle(tr("extract.title"))
         self.setMinimumSize(520, 460)
 
@@ -88,18 +99,17 @@ class ExtractDialog(QDialog):
 
         self.detected: str | None = None
         try:
-            self.detected = archive_info(archive).name_encoding
+            self.detected = archive_info(archive, password=password).name_encoding
         except ZipwiseError:
             self.detected = None
         self.encoding_combo = QComboBox()
         self.encoding_combo.setAccessibleName(tr("extract.encoding"))
         auto = tr("extract.encoding_auto", encoding=self.detected or "?")
         self.encoding_combo.addItem(auto, None)
-        names = list(CANDIDATES)
-        if "utf-8" not in names:
-            names.insert(0, "utf-8")
-        for name in names:
+        for name in encoding_choices():
             self.encoding_combo.addItem(name, name)
+        if name_encoding is not None:
+            self.encoding_combo.setCurrentIndex(max(self.encoding_combo.findData(name_encoding), 0))
         self.encoding_combo.setEnabled(self.detected is not None)
         self.encoding_combo.currentIndexChanged.connect(self.refresh_preview)
 
@@ -167,7 +177,9 @@ class ExtractDialog(QDialog):
         """Re-decode the entry names with the chosen encoding."""
         self.preview.clear()
         try:
-            entries = list_archive(self._archive, name_encoding=self.encoding())
+            entries = list_archive(
+                self._archive, password=self._password, name_encoding=self.encoding()
+            )
         except ZipwiseError as exc:
             self.preview_status.setText(exc.message)
             return

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtCore import QModelIndex, Qt, Signal
 from PySide6.QtGui import (
@@ -19,12 +20,15 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QStackedWidget,
     QStyle,
     QTableView,
@@ -34,9 +38,10 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..detect import detect
-from ..errors import Cancelled, WrongPassword, ZipwiseError
+from ..errors import Cancelled, PasswordRequired, WrongPassword, ZipwiseError
 from ..i18n import available_languages, current_language, is_rtl, set_language, tr
-from ..model import ArchiveInfo, ConflictAction, CreateOptions, OperationReport
+from ..jobs import JobContext
+from ..model import ArchiveEntry, ArchiveInfo, ConflictAction, CreateOptions, OperationReport
 from ..ops import archive_info, create_archive, extract_archive, list_archive, test_archive
 from ..settings import Settings, load_settings, save_settings
 from .conflict_dialog import ConflictDialog
@@ -48,7 +53,7 @@ from .entry_model import (
     format_ratio,
     format_size,
 )
-from .extract_dialog import ExtractDialog
+from .extract_dialog import ExtractDialog, encoding_choices
 from .password_dialog import PasswordDialog
 from .progress_dialog import ProgressDialog
 from .settings_dialog import LANGUAGE_NAMES, SettingsDialog
@@ -57,6 +62,18 @@ from .worker import Job, JobWorker
 
 MAX_PASSWORD_ATTEMPTS = 3
 JobFactory = Callable[[str | None], Job]
+
+
+@dataclasses.dataclass(frozen=True)
+class _OpenRequest:
+    """One attempt to read an archive; ``generation`` tells a stale result from the current one."""
+
+    generation: int
+    path: Path
+    encoding: str | None
+    password: str | None
+    attempt: int
+    fresh: bool  # a newly opened archive, not a re-listing with another names encoding
 
 
 def apply_language(lang: str) -> str:
@@ -97,6 +114,7 @@ def default_extract_dir(archive: Path) -> Path:
 
 class MainWindow(QMainWindow):
     job_ended = Signal(str)  # "finished", "failed" or "cancelled"
+    open_ended = Signal(str)  # "opened", "failed" or "cancelled"; never for a superseded open
 
     def __init__(self, settings: Settings | None = None, settings_path: Path | None = None) -> None:
         super().__init__()
@@ -106,6 +124,15 @@ class MainWindow(QMainWindow):
         self.info: ArchiveInfo | None = None
         self._worker: JobWorker | None = None
         self._progress: ProgressDialog | None = None
+        self._open_generation = 0
+        self._open_worker: JobWorker | None = None
+        self._open_request: _OpenRequest | None = None
+        # superseded workers stay here until their thread has stopped
+        self._open_workers: set[JobWorker] = set()
+        self._open_password: str | None = None
+        self._encoding: str | None = None  # the names encoding chosen by the user; None: automatic
+        self._detected: tuple[str | None, float | None] = (None, None)
+        self._legacy_names = False
         self.setAcceptDrops(True)
         self.resize(1000, 640)
 
@@ -158,6 +185,27 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("")
         self.statusBar().addWidget(self.status_label, 1)
+        self.open_progress = QProgressBar()
+        self.open_progress.setRange(0, 0)
+        self.open_progress.setTextVisible(False)
+        self.open_progress.setFixedWidth(120)
+        self.open_progress.setAccessibleName(tr("progress.bar"))
+        self.open_progress.hide()
+        self.statusBar().addPermanentWidget(self.open_progress)
+        self.encoding_label = QLabel("")
+        self.encoding_combo = QComboBox()
+        self.encoding_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.encoding_combo.addItem("", None)
+        for name in encoding_choices():
+            self.encoding_combo.addItem(name, name)
+        self.encoding_combo.currentIndexChanged.connect(self._on_encoding_changed)
+        self.encoding_box = QWidget()
+        box_layout = QHBoxLayout(self.encoding_box)
+        box_layout.setContentsMargins(0, 0, 0, 0)
+        box_layout.addWidget(self.encoding_label)
+        box_layout.addWidget(self.encoding_combo)
+        self.encoding_box.hide()
+        self.statusBar().addPermanentWidget(self.encoding_box)
 
         self._build_actions()
         self.setTabOrder(self.view, self.path_label)
@@ -319,8 +367,11 @@ class MainWindow(QMainWindow):
         self.path_label.setAccessibleName(tr("main.path"))
         self.view.setAccessibleName(tr("main.table"))
         self.model.retranslate()
+        self.encoding_label.setText(tr("main.encoding"))
+        self.encoding_combo.setAccessibleName(tr("main.encoding"))
         self._refresh_path_label()
         self._refresh_status()
+        self._refresh_encoding_ui()
         self.stack.setCurrentIndex(1 if self.archive_path else 0)
 
     # -- state ------------------------------------------------------------------------------
@@ -329,8 +380,13 @@ class MainWindow(QMainWindow):
     def busy(self) -> bool:
         return self._worker is not None
 
+    @property
+    def loading(self) -> bool:
+        """True while an archive is being read; opening another one is still allowed."""
+        return self._open_worker is not None
+
     def _update_actions(self, *_args: object) -> None:
-        has = self.archive_path is not None and not self.busy
+        has = self.archive_path is not None and not self.busy and not self.loading
         selected = bool(self.view.selectionModel().selectedRows())
         self.act_extract.setEnabled(has)
         self.act_test.setEnabled(has)
@@ -339,6 +395,7 @@ class MainWindow(QMainWindow):
         self.act_up.setEnabled(has and self.model.can_go_up())
         self.act_new.setEnabled(not self.busy)
         self.act_open.setEnabled(not self.busy)
+        self.encoding_combo.setEnabled(self._legacy_names and not self.busy and not self.loading)
 
     def _refresh_path_label(self) -> None:
         if self.archive_path is None:
@@ -348,6 +405,9 @@ class MainWindow(QMainWindow):
         self.path_label.setText(" / ".join(parts))
 
     def _refresh_status(self) -> None:
+        if self._open_request is not None and self.loading:
+            self.status_label.setText(tr("status.opening", name=self._open_request.path.name))
+            return
         info = self.info
         if info is None:
             self.status_label.setText(tr("status.ready"))
@@ -370,21 +430,143 @@ class MainWindow(QMainWindow):
         if path is not None:
             self.open_archive(path)
 
-    def open_archive(self, path: Path | str) -> bool:
-        path = Path(path)
-        try:
-            entries = list_archive(path)
-            info = archive_info(path)
-        except ZipwiseError as exc:
-            self.show_error(exc)
-            return False
-        self.archive_path = path
+    def open_archive(self, path: Path | str) -> None:
+        """Start reading ``path`` on a worker thread.
+
+        Another call (or a drop) before it ends supersedes it: the older result is discarded.
+        ``open_ended`` reports how the current one ended.
+        """
+        self._start_open(Path(path), None, fresh=True)
+
+    def _start_open(
+        self,
+        path: Path,
+        encoding: str | None,
+        *,
+        password: str | None = None,
+        attempt: int = 0,
+        fresh: bool,
+    ) -> None:
+        self._open_generation += 1
+        request = _OpenRequest(self._open_generation, path, encoding, password, attempt, fresh)
+        if self._open_worker is not None:
+            self._open_worker.cancel()
+
+        def job(ctx: JobContext) -> object:
+            entries = list_archive(path, password=password, name_encoding=encoding, ctx=ctx)
+            info = archive_info(path, password=password, name_encoding=encoding, ctx=ctx)
+            return entries, info
+
+        worker = JobWorker(job, parent=self)
+        self._open_worker, self._open_request = worker, request
+        self._open_workers.add(worker)
+        worker.finished.connect(lambda result: self._open_finished(request, worker, result))
+        worker.failed.connect(lambda exc: self._open_failed(request, worker, exc))
+        worker.cancelled.connect(lambda: self._open_cancelled(request, worker))
+        self.open_progress.show()
+        self._refresh_status()
+        self._update_actions()
+        worker.start()
+
+    def _reap_open_worker(self, worker: JobWorker) -> None:
+        self._open_workers.discard(worker)
+        worker.wait()
+        worker.deleteLater()
+
+    def _end_open(self) -> None:
+        self._open_worker = self._open_request = None
+        self.open_progress.hide()
+        self._refresh_status()
+        self._refresh_encoding_ui()
+
+    def _open_finished(self, request: _OpenRequest, worker: JobWorker, result: object) -> None:
+        self._reap_open_worker(worker)
+        if request.generation != self._open_generation:
+            return
+        entries, info = cast("tuple[list[ArchiveEntry], ArchiveInfo]", result)
+        self._open_worker = self._open_request = None
+        self.open_progress.hide()
+        self.archive_path = request.path
         self.info = info
+        self._encoding = request.encoding
+        self._open_password = request.password
+        if request.encoding is None:
+            self._detected = (info.name_encoding, info.encoding_confidence)
+        self._legacy_names = any(
+            e.raw_name is not None and any(b >= 0x80 for b in e.raw_name) for e in entries
+        )
         self.model.set_entries(entries)
         self.view.clearSelection()
         self.retranslate_ui()
         self._update_actions()
-        return True
+        self.open_ended.emit("opened")
+
+    def _open_failed(self, request: _OpenRequest, worker: JobWorker, exc: object) -> None:
+        self._reap_open_worker(worker)
+        if request.generation != self._open_generation:
+            return
+        self._open_worker = self._open_request = None
+        if isinstance(exc, PasswordRequired | WrongPassword) and (
+            request.attempt < MAX_PASSWORD_ATTEMPTS
+        ):
+            password = self._ask_password(wrong=isinstance(exc, WrongPassword))
+            if request.generation != self._open_generation:
+                return  # another open began while the question was on screen
+            if password:
+                self._start_open(
+                    request.path,
+                    request.encoding,
+                    password=password,
+                    attempt=request.attempt + 1,
+                    fresh=request.fresh,
+                )
+                return
+        self._end_open()
+        self.show_error(exc if isinstance(exc, BaseException) else Cancelled())
+        self.open_ended.emit("failed")
+
+    def _open_cancelled(self, request: _OpenRequest, worker: JobWorker) -> None:
+        self._reap_open_worker(worker)
+        if request.generation != self._open_generation:
+            return
+        self._end_open()
+        self.open_ended.emit("cancelled")
+
+    # -- names encoding ---------------------------------------------------------------------
+
+    def _auto_encoding_text(self) -> str:
+        encoding, confidence = self._detected
+        if encoding and confidence is not None:
+            return tr(
+                "main.encoding_auto",
+                encoding=ltr(encoding),
+                confidence=ltr(f"{round(confidence * 100)}%"),
+            )
+        return tr("main.encoding_auto_plain")
+
+    def _refresh_encoding_ui(self) -> None:
+        combo = self.encoding_combo
+        combo.blockSignals(True)
+        combo.setItemText(0, self._auto_encoding_text())
+        index = combo.findData(self._encoding) if self._encoding else 0
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(False)
+        tip = tr("main.encoding_tip" if self._legacy_names else "main.encoding_tip_unicode")
+        combo.setToolTip(tip)
+        self.encoding_label.setToolTip(tip)
+        self.encoding_box.setVisible(self.archive_path is not None)
+        self._update_actions()
+
+    def name_encoding(self) -> str | None:
+        """The names encoding chosen for the open archive; None means automatic detection."""
+        return self._encoding
+
+    def _on_encoding_changed(self, _index: int) -> None:
+        data = self.encoding_combo.currentData()
+        encoding = data if isinstance(data, str) else None
+        if self.archive_path is None or encoding == self._encoding:
+            return
+        self._start_open(self.archive_path, encoding, password=self._open_password, fresh=False)
 
     def _on_activated(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -554,7 +736,9 @@ class MainWindow(QMainWindow):
         dest, options = dialog.destination(), dialog.options()
 
         def factory(password: str | None) -> Job:
-            opts = dataclasses.replace(options, password=password or options.password)
+            opts = dataclasses.replace(
+                options, password=password or options.password or self._open_password
+            )
             return lambda ctx: extract_archive(archive, dest, opts, ctx)
 
         def done(_result: object) -> None:
@@ -563,7 +747,7 @@ class MainWindow(QMainWindow):
         self._start_job(tr("extract.progress_title"), factory, done)
 
     def _extract(self, selected: list[str] | None) -> None:
-        if self.archive_path is None:
+        if self.archive_path is None or self.loading:
             return
         dialog = ExtractDialog(
             self.archive_path,
@@ -572,6 +756,8 @@ class MainWindow(QMainWindow):
             selected,
             self,
             pick_directory=self._pick_directory,
+            name_encoding=self._encoding,
+            password=self._open_password,
         )
         if self._exec_dialog(dialog):
             self._run_extract(dialog)
@@ -586,11 +772,13 @@ class MainWindow(QMainWindow):
 
     def test_current(self) -> None:
         archive = self.archive_path
-        if archive is None:
+        if archive is None or self.loading:
             return
 
         def factory(password: str | None) -> Job:
-            return lambda ctx: test_archive(archive, password=password, ctx=ctx)
+            return lambda ctx: test_archive(
+                archive, password=password or self._open_password, ctx=ctx
+            )
 
         def done(result: object) -> None:
             if isinstance(result, OperationReport) and result.ok:
@@ -648,6 +836,11 @@ class MainWindow(QMainWindow):
     # -- closing ----------------------------------------------------------------------------
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._open_generation += 1  # whatever is still being opened must not touch the window
+        for opener in list(self._open_workers):
+            opener.shutdown()
+        self._open_workers.clear()
+        self._open_worker = self._open_request = None
         worker = self._worker
         if worker is not None:
             worker.shutdown()

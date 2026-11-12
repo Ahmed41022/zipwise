@@ -95,3 +95,18 @@ def test_catalogues_are_flat_string_maps() -> None:
         for key, value in i18n.load(lang).items():
             assert re.fullmatch(r"[a-z0-9_]+(\.[a-z0-9_]+)+", key), key
             assert isinstance(value, str)
+
+
+def test_names_encoding_and_opening_strings_in_both_languages() -> None:
+    keys = ("main.encoding", "main.encoding_auto", "main.encoding_auto_plain", "status.opening")
+    keys += ("main.encoding_tip", "main.encoding_tip_unicode")
+    for lang in ("en", "ar"):
+        assert all(k in i18n.load(lang) for k in keys), lang
+    assert i18n.tr("main.encoding_auto", encoding="cp1256", confidence="95%") == (
+        "Automatic (detected: cp1256, 95%)"
+    )
+    assert i18n.tr("status.opening", name="a.zip") == "Opening a.zip..."
+    i18n.set_language("ar")
+    text = i18n.tr("main.encoding_auto", encoding="cp1256", confidence="95%")
+    assert "cp1256" in text and "95" in text and ARABIC_LETTER.search(text)
+    assert "a.zip" in i18n.tr("status.opening", name="a.zip")

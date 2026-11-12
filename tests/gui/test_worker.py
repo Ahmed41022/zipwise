@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import itertools
 import sys
 import threading
 from collections.abc import Callable
@@ -98,27 +99,33 @@ def test_cancel_mid_create_leaves_no_output(qtbot, tmp_path: Path) -> None:
 
 
 def test_cancel_mid_extract_leaves_no_partial_files(
-    qtbot, tmp_path: Path, sample_zip: Path
+    qtbot, tmp_path: Path, bulk_tree: Path, bulk_zip: Path, check_extraction
 ) -> None:
     out = tmp_path / "ex"
     holder: list[JobWorker] = []
 
     def job(ctx: JobContext) -> object:
         inner = ctx.on_progress
+        # report after every entry, not at most 20 times a second, so the cut is not timing based
+        ticks = itertools.count(step=1.0)
+        ctx._clock = lambda: next(ticks)
 
         def hook(event) -> None:
             if inner:
                 inner(event)
-            if event.phase == "extract":
+            if event.phase == "extract" and event.entries_done >= 3:
                 holder[0].cancel()
 
         ctx.on_progress = hook
-        return extract_archive(sample_zip, out, ExtractOptions(), ctx)
+        return extract_archive(bulk_zip, out, ExtractOptions(), ctx)
 
     worker = JobWorker(job)
     holder.append(worker)
     run(qtbot, worker, "cancelled")
-    assert not list(out.rglob("*.zwpart")) if out.exists() else True
+    assert not list(out.rglob("*.zwpart"))
+    done = check_extraction(out, bulk_tree)
+    # cancelled after three entries and before the last one: some files are there, not all
+    assert 1 <= len(done) < len(list(bulk_tree.iterdir()))
 
 
 def _conflict_setup(tmp_path: Path) -> tuple[Path, Path]:

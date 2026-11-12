@@ -43,10 +43,10 @@ def test_language_menu_actions_trigger_switch(win: tuple[MainWindow, Recorder]) 
 
 
 def test_headers_and_status_retranslate_with_archive_open(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, _ = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     window.change_language("ar")
     assert window.model.headerData(0, Qt.Orientation.Horizontal) == i18n.load("ar")["column.name"]
     assert "عنصر" in window.status_label.text()

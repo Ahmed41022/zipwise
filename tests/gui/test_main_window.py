@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import threading
+import zlib
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
 from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import QApplication
 
+from helpers.builders import file_entry, write_raw_zip
 from helpers.recorder import Recorder
 from zipwise.errors import ZipwiseError
 from zipwise.gui.main_window import (
@@ -16,8 +19,8 @@ from zipwise.gui.main_window import (
     default_extract_dir,
 )
 from zipwise.jobs import JobContext
-from zipwise.model import CreateOptions
-from zipwise.ops import create_archive
+from zipwise.model import CreateOptions, ExtractOptions
+from zipwise.ops import create_archive, extract_archive
 from zipwise.ops import test_archive as verify_archive
 
 
@@ -36,10 +39,10 @@ def test_empty_state_before_anything_is_open(win: tuple[MainWindow, Recorder]) -
 
 
 def test_open_zip_fills_table_and_status(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, rec = win
-    assert window.open_archive(sample_zip)
+    assert open_wait(window, sample_zip) == "opened"
     assert not rec.errors
     assert window.stack.currentIndex() == 1
     assert window.model.rowCount() == 1
@@ -51,36 +54,39 @@ def test_open_zip_fills_table_and_status(
 
 
 def test_open_missing_file_goes_to_show_error(
-    win: tuple[MainWindow, Recorder], tmp_path: Path
+    open_wait, win: tuple[MainWindow, Recorder], tmp_path: Path
 ) -> None:
     window, rec = win
-    assert not window.open_archive(tmp_path / "nope.zip")
+    assert open_wait(window, tmp_path / "nope.zip") == "failed"
     assert isinstance(rec.errors[0], ZipwiseError)
     assert window.archive_path is None
 
 
 def test_open_non_archive_goes_to_show_error(
-    win: tuple[MainWindow, Recorder], tmp_path: Path
+    open_wait, win: tuple[MainWindow, Recorder], tmp_path: Path
 ) -> None:
     window, rec = win
     plain = tmp_path / "plain.txt"
     plain.write_text("hello")
-    assert not window.open_archive(plain)
+    assert open_wait(window, plain) == "failed"
     assert len(rec.errors) == 1
 
 
 def test_open_dialog_uses_overridable_picker(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    qtbot, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, _ = win
     window._pick_open_archive = lambda: sample_zip  # type: ignore[method-assign]
-    window.open_dialog()
+    with qtbot.waitSignal(window.open_ended, timeout=10000):
+        window.open_dialog()
     assert window.archive_path == sample_zip
 
 
-def test_navigation_double_click_and_up(win: tuple[MainWindow, Recorder], sample_zip: Path) -> None:
+def test_navigation_double_click_and_up(
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
+) -> None:
     window, _ = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     window._on_activated(window.model.index(0, 0))
     assert window.model.current_dir == "proj"
     names = [window.model.entry_at(r).name for r in range(window.model.rowCount())]
@@ -93,10 +99,10 @@ def test_navigation_double_click_and_up(win: tuple[MainWindow, Recorder], sample
 
 
 def test_activating_a_file_does_not_navigate(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, _ = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     window.model.set_current_dir("proj")
     file_row = next(
         r for r in range(window.model.rowCount()) if not window.model.entry_at(r).is_dir
@@ -106,10 +112,10 @@ def test_activating_a_file_does_not_navigate(
 
 
 def test_selection_enables_extract_selected(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, _ = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     assert not window.act_extract_sel.isEnabled()
     window.view.selectRow(0)
     assert window.act_extract_sel.isEnabled()
@@ -117,10 +123,10 @@ def test_selection_enables_extract_selected(
 
 
 def test_sorting_through_the_view_keeps_folders_first(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, _ = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     window.model.set_current_dir("proj")
     window.view.sortByColumn(1, Qt.SortOrder.DescendingOrder)
     assert window.model.entry_at(0).is_dir
@@ -149,9 +155,12 @@ def _drop(window: MainWindow, *paths: Path) -> None:
     window.dropEvent(event)
 
 
-def test_dropping_an_archive_opens_it(win: tuple[MainWindow, Recorder], sample_zip: Path) -> None:
+def test_dropping_an_archive_opens_it(
+    qtbot, win: tuple[MainWindow, Recorder], sample_zip: Path
+) -> None:
     window, _ = win
-    _drop(window, sample_zip)
+    with qtbot.waitSignal(window.open_ended, timeout=10000):
+        _drop(window, sample_zip)
     assert window.archive_path == sample_zip
 
 
@@ -197,9 +206,9 @@ def test_create_through_dialog_and_worker(
 
     window._exec_dialog = fill  # type: ignore[method-assign]
     assert wait_job(qtbot, window, lambda: window.new_archive([proj_tree])) == "finished"
+    qtbot.waitUntil(lambda: window.archive_path == dest and not window.loading, timeout=10000)
     assert not rec.errors
     assert verify_archive(dest).ok
-    assert window.archive_path == dest
 
 
 def test_create_opens_the_archive_when_a_split_was_not_needed(
@@ -211,8 +220,8 @@ def test_create_opens_the_archive_when_a_split_was_not_needed(
     assert wait_job(qtbot, window, lambda: window.create_with([proj_tree], dest, options)) == (
         "finished"
     )
+    qtbot.waitUntil(lambda: window.archive_path == dest and not window.loading, timeout=10000)
     assert not rec.errors
-    assert window.archive_path == dest
     assert not (tmp_path / "small.zip.001").exists()
 
 
@@ -229,10 +238,15 @@ def test_create_asks_before_replacing(
 
 
 def test_extract_through_dialog_and_worker(
-    qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path, sample_zip: Path
+    open_wait,
+    qtbot,
+    win: tuple[MainWindow, Recorder],
+    tmp_path: Path,
+    proj_tree: Path,
+    sample_zip: Path,
 ) -> None:
     window, rec = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     out = tmp_path / "extracted"
 
     def fill(dialog) -> bool:
@@ -249,10 +263,10 @@ def test_extract_through_dialog_and_worker(
 
 
 def test_extract_selected_only(
-    qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, sample_zip: Path
+    open_wait, qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, sample_zip: Path
 ) -> None:
     window, _ = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     window.model.set_current_dir("proj")
     row = next(
         r for r in range(window.model.rowCount()) if window.model.entry_at(r).name == "top.txt"
@@ -271,12 +285,12 @@ def test_extract_selected_only(
 
 
 def test_extract_wrong_then_right_password(
-    qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
+    open_wait, qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
 ) -> None:
     window, rec = win
     locked = tmp_path / "locked.zip"
     create_archive([proj_tree], locked, CreateOptions(password="pw"), JobContext())
-    window.open_archive(locked)
+    open_wait(window, locked)
     answers = iter(["bad", "pw"])
     window._ask_password = lambda wrong=False: next(answers)  # type: ignore[method-assign]
     out = tmp_path / "unlocked"
@@ -292,47 +306,62 @@ def test_extract_wrong_then_right_password(
 
 
 def test_wrong_password_three_times_shows_error(
-    qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
+    open_wait, qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
 ) -> None:
     window, rec = win
     locked = tmp_path / "locked.zip"
     create_archive([proj_tree], locked, CreateOptions(password="pw"), JobContext())
-    window.open_archive(locked)
+    open_wait(window, locked)
     window._ask_password = lambda wrong=False: "bad"  # type: ignore[method-assign]
     window._exec_dialog = lambda d: d.dest_edit.setText(str(tmp_path / "x")) or True  # type: ignore[method-assign]
     assert wait_job(qtbot, window, window.extract_all) == "failed"
     assert rec.errors[0].code == "wrong-password"  # type: ignore[attr-defined]
 
 
-def test_corrupt_archive_error_routed_to_show_error(
-    qtbot, win: tuple[MainWindow, Recorder], tmp_path: Path, sample_zip: Path
+def test_damaged_entry_is_reported_by_the_test_action(
+    qtbot, open_wait, win: tuple[MainWindow, Recorder], tmp_path: Path
 ) -> None:
     window, rec = win
-    window.open_archive(sample_zip)
-    data = bytearray(sample_zip.read_bytes())
-    data[60:80] = b"\xff" * 20
-    sample_zip.write_bytes(bytes(data))
-    outcome = wait_job(qtbot, window, window.test_current)
-    if outcome == "failed":
-        assert rec.errors
-    else:
-        assert rec.messages and rec.messages[-1][0] == "Test archive"
+    good = b"intact " * 20
+    # the stored bytes of "b.txt" do not match its recorded CRC-32, which is always detected
+    damaged = write_raw_zip(
+        tmp_path / "damaged.zip",
+        [
+            file_entry("a.txt", good, method=0),
+            file_entry("b.txt", good, method=0, declared_crc=zlib.crc32(good) ^ 0xFFFFFFFF),
+        ],
+    )
+    assert open_wait(window, damaged) == "opened"
+    assert wait_job(qtbot, window, window.test_current) == "finished"
+    assert not rec.errors
+    assert rec.messages == [("Test archive", "The archive has 1 damaged entries.")]
+
+
+def test_unreadable_archive_error_is_routed_to_show_error_once(
+    qtbot, open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
+) -> None:
+    window, rec = win
+    assert open_wait(window, sample_zip) == "opened"
+    sample_zip.write_bytes(b"PK" + b"x" * 40)  # no central directory: never readable
+    assert wait_job(qtbot, window, window.test_current) == "failed"
+    assert [e.code for e in rec.errors] == ["corrupt-archive"]  # type: ignore[attr-defined]
+    assert not rec.messages
 
 
 def test_test_action_reports_intact_archive(
-    qtbot, win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, qtbot, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, rec = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     assert wait_job(qtbot, window, window.test_current) == "finished"
     assert "intact" in rec.messages[-1][1]
 
 
 def test_info_action_lists_format_and_entries(
-    win: tuple[MainWindow, Recorder], sample_zip: Path
+    open_wait, win: tuple[MainWindow, Recorder], sample_zip: Path
 ) -> None:
     window, rec = win
-    window.open_archive(sample_zip)
+    open_wait(window, sample_zip)
     window.show_info()
     title, text = rec.messages[-1]
     assert "zip" in text and "Entries" in text
@@ -362,6 +391,51 @@ def test_cancel_through_progress_dialog(qtbot, win: tuple[MainWindow, Recorder])
         assert not progress.cancel_button.isEnabled()
     assert blocker.args == ["cancelled"]
     assert not window.busy
+
+
+def test_cancel_mid_extract_through_progress_dialog_leaves_only_complete_files(
+    qtbot,
+    win: tuple[MainWindow, Recorder],
+    tmp_path: Path,
+    bulk_tree: Path,
+    bulk_zip: Path,
+    check_extraction,
+) -> None:
+    window, _ = win
+    out = tmp_path / "cancelled"
+    paused = threading.Event()
+
+    def factory(_pw: str | None):
+        def job(ctx: JobContext) -> object:
+            inner = ctx.on_progress
+            ticks = itertools.count(step=1.0)  # one progress event per entry, not per 50 ms
+            ctx._clock = lambda: next(ticks)
+
+            def hook(event) -> None:
+                if inner:
+                    inner(event)
+                if event.phase == "extract" and event.entries_done >= 3 and not paused.is_set():
+                    paused.set()
+                    gate = threading.Event()
+                    while not gate.wait(0.01):  # waits here until Cancel has been clicked
+                        ctx.raise_if_cancelled()
+
+            ctx.on_progress = hook
+            return extract_archive(bulk_zip, out, ExtractOptions(), ctx)
+
+        return job
+
+    with qtbot.waitSignal(window.job_ended, timeout=10000) as blocker:
+        window._start_job("t", factory, lambda r: None)
+        qtbot.waitUntil(paused.is_set, timeout=10000)
+        progress = window._progress
+        assert progress is not None
+        progress.cancel_button.click()
+    assert blocker.args == ["cancelled"]
+    assert not window.busy
+    assert not list(out.rglob("*.zwpart"))
+    done = check_extraction(out, bulk_tree)
+    assert 1 <= len(done) < len(list(bulk_tree.iterdir()))
 
 
 def test_closing_the_window_during_a_job_cancels_and_waits(
