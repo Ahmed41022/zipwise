@@ -156,7 +156,8 @@ class RarReader(ArchiveReader):
             raise PasswordRequired("This archive is password protected") from exc
         except rarfile.NoCrypto as exc:
             raise BackendUnavailable(
-                "This RAR archive has encrypted headers", hint="Install: pip install cryptography"
+                "This RAR archive has encrypted headers",
+                hint="Reinstall Zipwise, or run: pip install cryptography",
             ) from exc
         except rarfile.NeedFirstVolume as exc:
             raise UsageError(

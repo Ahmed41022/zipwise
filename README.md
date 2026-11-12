@@ -445,9 +445,8 @@ winget install RARLab.WinRAR        # Windows (or: winget install 7zip.7zip)
 sudo apt install unrar              # Debian / Ubuntu
 ```
 
-Archives with encrypted file names also need the `cryptography` package
-(`pip install "zipwise[rar]"`); without it Zipwise says so. Only the first volume of a
-multi-volume RAR set can be opened.
+Archives with encrypted file names work too; the `cryptography` package they need is
+installed with Zipwise. Only the first volume of a multi-volume RAR set can be opened.
 
 ## Limitations and not in v1
 
@@ -472,6 +471,7 @@ Zipwise itself is MIT-licensed. It uses these packages, none of them modified or
 | py7zr | 7z | LGPL-2.1-or-later |
 | zstandard | zstd | BSD-3-Clause |
 | rarfile | RAR reading | ISC |
+| cryptography | RAR archives with encrypted file names | Apache-2.0 or BSD-3-Clause |
 | PySide6 (optional, `gui` extra) | GUI | LGPL-3.0 |
 
 The external RAR tools are separate programs under their own licences.

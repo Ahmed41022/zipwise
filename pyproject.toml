@@ -24,6 +24,8 @@ dependencies = [
     "py7zr>=1.0,<2",
     "zstandard",
     "rarfile",
+    # rarfile needs it to open RAR archives whose file names are encrypted.
+    "cryptography",
 ]
 
 [project.optional-dependencies]
@@ -33,9 +35,7 @@ gui = [
     "PySide6>=6.6,<6.12; python_version < '3.12'",
     "PySide6>=6.6; python_version >= '3.12'",
 ]
-# Needed only to open RAR archives whose file names are encrypted (rarfile asks for it).
-rar = ["cryptography"]
-dev = ["pytest", "pytest-qt", "ruff", "mypy", "cryptography"]
+dev = ["pytest", "pytest-qt", "ruff", "mypy"]
 
 [project.scripts]
 zipwise = "zipwise.cli.main:main"

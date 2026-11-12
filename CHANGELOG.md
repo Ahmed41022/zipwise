@@ -10,7 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - An interoperability test suite (`tests/interop`) that runs the real 7-Zip, `rar` and `unrar`.
-- A `rar` extra (`cryptography`) for RAR archives with encrypted file names.
+- `cryptography` is now a dependency, so RAR archives with encrypted file names open without
+  extra steps.
 
 ### Fixed
 
