@@ -237,6 +237,28 @@ def test_create_asks_before_replacing(
     assert not window.busy
 
 
+def test_create_asks_before_replacing_an_old_split_set(
+    win: tuple[MainWindow, Recorder], tmp_path: Path, proj_tree: Path
+) -> None:
+    window, _ = win
+    old = tmp_path / "old.zip"
+    create_archive([proj_tree], old, CreateOptions(split_size=300), JobContext())
+    parts = sorted(p.name for p in tmp_path.glob("old.zip.*"))
+    assert "old.zip.001" in parts and not old.exists()
+    asked: list[str] = []
+
+    def decline(title: str, text: str) -> bool:
+        asked.append(text)
+        return False
+
+    window._confirm = decline  # type: ignore[method-assign]
+    window.create_with([proj_tree], old, CreateOptions())
+    assert len(asked) == 1
+    assert sorted(p.name for p in tmp_path.glob("old.zip.*")) == parts
+    assert not old.exists()
+    assert not window.busy
+
+
 def test_extract_through_dialog_and_worker(
     open_wait,
     qtbot,

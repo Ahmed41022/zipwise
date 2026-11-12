@@ -263,6 +263,43 @@ def find_parts(any_part: Path | str) -> PartSet:
     return result
 
 
+def existing_set(dest: Path | str) -> PartSet | None:
+    """The numbered set written for the archive name ``dest`` (``dest.001`` and on), or None
+    when there is none or it cannot be identified (a gap, a manifest that disagrees)."""
+    path = Path(os.path.abspath(dest))
+    first = path.with_name(part_name(path.name, 1, _MIN_DIGITS))
+    try:
+        return find_parts(first) if first.is_file() else None
+    except (CorruptArchive, UsageError, OSError):
+        return None
+
+
+def remove_set(old: PartSet, keep: Sequence[Path | str] = ()) -> list[Path]:
+    """Delete the parts of ``old``, its manifest and, when it was written for this set,
+    ``HOW-TO-OPEN.txt``. Files in ``keep`` and anything else in the folder stay."""
+    kept = {os.path.normcase(os.path.abspath(p)) for p in keep}
+    victims = list(old.parts)
+    if old.manifest_path is not None:
+        victims.append(old.manifest_path)
+    notes = old.directory / NOTES_NAME
+    if _notes_are_for(notes, old.base):
+        victims.append(notes)
+    removed: list[Path] = []
+    for path in victims:
+        if os.path.normcase(os.path.abspath(path)) not in kept and path.is_file():
+            remove_quietly(path)
+            removed.append(path)
+    return removed
+
+
+def _notes_are_for(notes: Path, base: str) -> bool:
+    try:
+        text = notes.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return f'"{base}" was split into' in text
+
+
 def _check_against_manifest(parts: PartSet, manifest: Manifest) -> None:
     on_disk = {p.name: p for p in parts.parts}
     for listed in manifest.parts:

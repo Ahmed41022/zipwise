@@ -290,6 +290,44 @@ Notes:
   multiple sources for it.
 - Symlinks are stored as links, not followed (unless `--follow-symlinks`).
 
+## Tested against
+
+The `tests/interop` suite builds archives with the real tools and reads them back with Zipwise,
+and the other way round. It ran against 7-Zip 23.01 (Linux) and 7-Zip 25.01 (Windows), and
+against RAR and UNRAR 7.00 (Linux, on a developer machine only: the `rar` program that creates
+RAR archives is not available in CI, and CI skips the 7-Zip tests on Linux). Every case below
+compares bytes, names, empty folders and modification times (within 2 s).
+
+- **7-Zip's 7z to Zipwise (list, test, extract):** LZMA2 (solid, non-solid, multithreaded,
+  several folders), LZMA, PPMd, BZip2, Deflate, Copy, the BCJ, PPC and Delta filters, AES-256
+  with and without encrypted names, multi-volume sets opened from `.7z.001` or a later volume,
+  and an empty archive.
+- **7-Zip's ZIP to Zipwise:** Deflate, BZip2, LZMA, Store, AES-256, ZipCrypto, Unicode names,
+  multi-volume `.zip.001`; tar, tar.gz, tar.bz2, tar.xz and single-file gz, bz2, xz.
+- **Zipwise to 7-Zip (`7z t` and `7z x`):** ZIP (default, level 0, AES-256), 7z (plain,
+  password, password with encrypted names), tar, tar.gz, tar.bz2, tar.xz, single-file gz, bz2,
+  xz, and split sets (`.zip.001`, `.7z.001`, `.tar.001`). zstd was not checked, because 7-Zip
+  23.01 cannot read it.
+- **RAR 5 written by RAR 7.00, read through `unrar`:** default, solid, best, stored, password,
+  encrypted file names, multi-volume (`name.part01.rar`), Unicode names, empty folders.
+  Through 7-Zip 23.01 as the extraction tool only stored RAR 7 archives could be extracted;
+  that 7-Zip cannot decode what RAR 7.00 compresses.
+- RAR 4 archives were only checked with a stored, hand-built file: RAR 7.00 cannot create them.
+
+Not supported, and how it shows:
+
+- **ZIP entries that use Deflate64** (7-Zip's `-mm=Deflate64`) and other methods the Python
+  standard library cannot decode (Shrink, Implode, Zstandard, XZ, PPMd): `list` works, `test`
+  and `extract` stop with exit code 3 and say `uses Deflate64 compression, which Zipwise cannot
+  read yet`.
+- **7z archives that use the BCJ2 or ARM64 filter** (py7zr cannot decode them): the same, naming
+  the method.
+- **RAR through 7-Zip, unar or bsdtar:** when the tool refuses an entry, Zipwise reports exit
+  code 3 and suggests `unrar` instead of calling the archive damaged.
+- **Non-ASCII ZIP passwords:** Zipwise encodes them as UTF-8, as WinZip AES does. 7-Zip on
+  Windows converts them with a legacy code page, so such a ZIP does not open there. Use an
+  ASCII password when the ZIP goes to 7-Zip on Windows.
+
 ## Safety model
 
 Extraction is planned before anything is written. Zipwise never calls `extractall`-style
@@ -407,7 +445,8 @@ winget install RARLab.WinRAR        # Windows (or: winget install 7zip.7zip)
 sudo apt install unrar              # Debian / Ubuntu
 ```
 
-Archives with encrypted headers also need the `cryptography` package. Only the first volume of a
+Archives with encrypted file names also need the `cryptography` package
+(`pip install "zipwise[rar]"`); without it Zipwise says so. Only the first volume of a
 multi-volume RAR set can be opened.
 
 ## Limitations and not in v1
@@ -417,8 +456,7 @@ multi-volume RAR set can be opened.
 - No Explorer or file-manager integration yet, no installer, no standalone build.
 - Creating an archive cannot be resumed.
 - No RAR creation, no repair of damaged archives, no ISO, CAB or ARJ.
-- 7z support is tested against files written by py7zr (which Zipwise uses); archives from other
-  7z tools should work but are less exercised.
+- Some archives written by other tools cannot be read yet; see [Tested against](#tested-against).
 - POSIX permission bits are stored and restored on Linux and ignored on Windows. Creating
   symlinks on Windows needs Developer Mode or the right privilege; without it a link entry is
   skipped with a warning.

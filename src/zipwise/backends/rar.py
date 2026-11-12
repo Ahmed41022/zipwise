@@ -6,6 +6,7 @@ parses headers; extracting and testing need ``unrar``, ``unar``, ``7z`` or ``bsd
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from typing import Any
 import rarfile
 
 from ..errors import (
+    PASSWORD_REQUIRED_HINT,
     BackendUnavailable,
     CorruptArchive,
     PasswordRequired,
@@ -34,6 +36,10 @@ TOOLS = ("unrar", "unar", "7z", "7zz", "bsdtar")
 INSTALL_HINT = (
     "Install an extraction tool. Windows: winget install RARLab.WinRAR "
     "(or: winget install 7zip.7zip). Linux: sudo apt install unrar"
+)
+UNRAR_HINT = (
+    "unrar reads every kind of RAR archive. Windows: winget install RARLab.WinRAR. "
+    "Linux: sudo apt install unrar"
 )
 _RAR_OS_UNIX = 3
 _SYMLINK_REDIRECTS = (1, 2)  # RAR5 "unix symlink" and "windows symlink"
@@ -70,6 +76,34 @@ def require_tool() -> str:
             "A tool for reading RAR archives was found but could not be run", hint=INSTALL_HINT
         ) from exc
     return sorted(available, key=TOOLS.index)[0]
+
+
+def _current_tool() -> str | None:
+    """Name of the program rarfile runs to extract (``unrar``, ``7z`` ...), if one is set up."""
+    setup: Any = getattr(rarfile, "CURRENT_SETUP", None)
+    try:
+        exe = getattr(rarfile, setup.setup["open_cmd"][0])
+    except (AttributeError, KeyError, IndexError, TypeError):
+        return None
+    return os.path.splitext(os.path.basename(str(exe)))[0]
+
+
+def _tool_gave_up(exc: Exception) -> str | None:
+    """The tool's name when ``exc`` is the short read or bad checksum that follows a failed
+    extraction.
+
+    rarfile merges the tool's error output into the data stream, so when 7-Zip, unar or bsdtar
+    refuse an entry (an unsupported method, a wrong password) rarfile only notices that too few
+    bytes arrived, or that the "data" (an error message) has the wrong checksum. ``unrar`` has
+    proper exit codes, so for it the same symptoms mean damage."""
+    text = str(exc)
+    short = "Failed the read enough data" in text or "CRC check failed" in text
+    if not isinstance(exc, rarfile.BadRarFile) or not short:
+        return None
+    tool = _current_tool()
+    if tool is None or tool.lower().startswith("unrar"):
+        return None
+    return tool
 
 
 class _Guard:
@@ -112,7 +146,10 @@ class RarReader(ArchiveReader):
 
     def _open(self) -> Any:
         try:
-            return rarfile.RarFile(str(self.path), errors="strict")
+            rf = rarfile.RarFile(str(self.path), errors="strict")
+            if rf.needs_password() and not rf.infolist():
+                self._unlock_headers(rf)  # rarfile shows no entries until it has the password
+            return rf
         except FileNotFoundError as exc:
             raise UsageError(f"File not found: {self.path}") from exc
         except rarfile.PasswordRequired as exc:
@@ -134,6 +171,25 @@ class RarReader(ArchiveReader):
         except OSError as exc:
             raise translate_oserror(exc, f"cannot read {self.path.name}") from exc
 
+    def _unlock_headers(self, rf: Any) -> None:
+        """Re-read an archive whose file names are encrypted, using the password."""
+        if not self._password:
+            rf.close()
+            raise PasswordRequired(
+                "This archive is password protected", hint=PASSWORD_REQUIRED_HINT
+            )
+        try:
+            rf.setpassword(self._password)
+        except (rarfile.RarWrongPassword, rarfile.BadRarFile) as exc:
+            rf.close()
+            raise WrongPassword(
+                "Wrong password, or the archive is damaged",
+                hint="Check the password. If it is right, the archive is damaged.",
+            ) from exc
+        if not rf.infolist():  # a wrong key decrypts the headers to garbage and ends the list
+            rf.close()
+            raise WrongPassword("Wrong password, or the archive is damaged")
+
     def _translate(self, exc: Exception, entry: ArchiveEntry) -> ZipwiseError:
         if isinstance(exc, ZipwiseError):
             return exc
@@ -143,6 +199,18 @@ class RarReader(ArchiveReader):
             return WrongPassword(f"Wrong password for {entry.name!r}")
         if isinstance(exc, rarfile.RarCannotExec):
             return BackendUnavailable("The RAR extraction tool could not be run", hint=INSTALL_HINT)
+        tool = _tool_gave_up(exc)
+        if tool is not None:
+            if entry.encrypted and self._password:
+                return WrongPassword(
+                    f"Wrong password for {entry.name!r}, or {tool} cannot read this archive",
+                    hint=UNRAR_HINT,
+                )
+            return UnsupportedFormat(
+                f"{tool} could not extract {entry.name!r}: it may not support how this RAR "
+                "archive was compressed, or the data is damaged",
+                hint=UNRAR_HINT,
+            )
         if isinstance(exc, rarfile.BadRarFile | rarfile.RarCRCError | rarfile.RarExecError):
             if entry.encrypted and self._password and isinstance(exc, rarfile.BadRarFile):
                 return WrongPassword(f"Wrong password, or damaged data in {entry.name!r}")

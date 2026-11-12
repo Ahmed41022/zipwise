@@ -440,9 +440,24 @@ def run_test(args: argparse.Namespace, env: RunEnv) -> Result:
     result = _report_result("test", report, archive=_abs(archive), entries_count=total)
     if not report.ok:
         bad = report.entries_skipped
-        result.exit_code = int(ExitCode.CORRUPT)
-        message = f"{plural(bad, 'damaged entry')} found" if bad else "damage found"
-        result.error = {"code": "test-failed", "message": f"{message} in {archive}", "hint": None}
+        errors = [i for i in report.issues if i.severity == "error"]
+        if errors and all(i.code == "unsupported-format" for i in errors):
+            # nothing is damaged: Zipwise just cannot decode these entries
+            result.exit_code = int(ExitCode.UNSUPPORTED)
+            result.error = {
+                "code": "unsupported-format",
+                "message": f"{plural(len(errors), 'entry')} in {archive} cannot be checked: "
+                "unsupported compression",
+                "hint": None,
+            }
+        else:
+            result.exit_code = int(ExitCode.CORRUPT)
+            message = f"{plural(bad, 'damaged entry')} found" if bad else "damage found"
+            result.error = {
+                "code": "test-failed",
+                "message": f"{message} in {archive}",
+                "hint": None,
+            }
     else:
         result.summary = f"OK ({plural(total, 'entry')})"
     return result

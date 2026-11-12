@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- An interoperability test suite (`tests/interop`) that runs the real 7-Zip, `rar` and `unrar`.
+- A `rar` extra (`cryptography`) for RAR archives with encrypted file names.
+
+### Fixed
+
+- RAR archives with encrypted file names were listed as empty; they now ask for the password.
+- ZIP entries that use Deflate64 (and other methods the standard library lacks) and 7z entries
+  that use BCJ2 or ARM64 now fail with an error that names the method (exit code 3), and
+  `test` exits with 3 instead of 4 for them.
+- A RAR entry that 7-Zip, unar or bsdtar refused to extract was reported as damaged or as a
+  wrong password; Zipwise now says the tool could not extract it and suggests `unrar`.
+- Creating over an older split set (`--force`) removes that set's parts, manifest and
+  `HOW-TO-OPEN.txt` instead of leaving them next to the new archive.
+
 ## [0.1.0] - 2026-11-11
 
 First release.

@@ -13,7 +13,7 @@ from ..jobs import JobContext
 from ..model import CreateOptions, EntryType, Issue, OperationReport
 from ..registry import capability, get_reader, get_writer, get_writer_class
 from ..smart import should_store
-from ..split import manifest_name, recipient_notes, split_file
+from ..split import existing_set, manifest_name, recipient_notes, remove_set, split_file
 from ._input import progress_total
 
 # Issue code reported when a split was asked for but the archive fits in one part.
@@ -69,7 +69,9 @@ def create_archive(
     The archive is written to ``dest.partial`` and renamed only after it passed verification,
     so an existing ``dest`` is never replaced by a broken file. With ``split_size`` the verified
     archive is cut into numbered parts, unless it already fits in one part: then it is kept as
-    ``dest`` and the report carries an info issue with code ``split-not-needed``.
+    ``dest`` and the report carries an info issue with code ``split-not-needed``. Parts, manifest
+    and notes of an older split set for the same ``dest`` that the new result does not reuse are
+    removed once the new archive is in place.
     """
     options = options or CreateOptions()
     ctx = ctx or JobContext()
@@ -91,6 +93,7 @@ def create_archive(
     except OSError as exc:
         raise translate_oserror(exc, f"cannot create {target.parent}") from exc
 
+    previous = existing_set(target)  # an older split set, identified before anything is written
     atomic = AtomicFile(target, ".partial")
     ctx.begin("scan")
     items = []
@@ -163,6 +166,8 @@ def create_archive(
     except BaseException:
         atomic.discard()
         raise
+    if previous is not None:
+        remove_set(previous, keep=outputs)
     ctx.finish()
     return OperationReport.build(
         issues,

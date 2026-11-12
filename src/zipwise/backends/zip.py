@@ -50,6 +50,21 @@ _EXTRA_UNICODE_PATH = 0x7075
 _MAX_LINK_BYTES = 64 * 1024
 _DOS_MIN_YEAR, _DOS_MAX_YEAR = 1980, 2107
 
+# ZIP compression methods that the standard library cannot decode, for the error message
+_METHOD_NAMES = {
+    1: "Shrink",
+    6: "Implode",
+    9: "Deflate64",
+    10: "PKWARE DCL Implode",
+    18: "IBM TERSE",
+    19: "IBM LZ77",
+    93: "Zstandard",
+    95: "XZ",
+    96: "JPEG",
+    97: "WavPack",
+    98: "PPMd",
+}
+
 
 def _pyzipper() -> ModuleType:
     try:
@@ -324,7 +339,12 @@ class ZipReader(ArchiveReader):
             return exc
         text = str(exc)
         if isinstance(exc, NotImplementedError):  # a RuntimeError subclass: check it first
-            return UnsupportedFormat(f"{entry.name!r} uses an unsupported compression method")
+            method = self._infos[entry.index].compress_type
+            name = _METHOD_NAMES.get(method, f"method {method}")
+            return UnsupportedFormat(
+                f"{entry.name!r} uses {name} compression, which Zipwise cannot read yet",
+                hint="Extract it with 7-Zip instead.",
+            )
         if isinstance(exc, RuntimeError):
             if "Bad password" in text:
                 return WrongPassword(f"Wrong password for {entry.name!r}")

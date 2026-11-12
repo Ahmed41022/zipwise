@@ -55,6 +55,20 @@ _AES_METHOD = b"\x06\xf1\x07\x01"
 _MAX_LINK_BYTES = 64 * 1024
 _FILE_ATTRIBUTE_READONLY = 0x01
 
+# 7z method ids that other tools write and py7zr cannot decode, for the error message
+_METHOD_NAMES: dict[bytes, str] = {
+    bytes.fromhex("0303011B"): "BCJ2",
+    bytes.fromhex("0A"): "ARM64",
+    bytes.fromhex("0B"): "RISC-V",
+    bytes.fromhex("04F71101"): "Zstandard",
+    bytes.fromhex("04F71102"): "Brotli",
+    bytes.fromhex("04F71104"): "LZ4",
+    bytes.fromhex("04F71105"): "LZ5",
+    bytes.fromhex("04F71106"): "Lizard",
+    bytes.fromhex("0405"): "Z",
+    bytes.fromhex("0406"): "LZH",
+}
+
 
 class _Probed(Exception):
     """Raised by a probe stream to stop py7zr as soon as the first bytes decrypted."""
@@ -349,7 +363,7 @@ class SevenZipReader(ArchiveReader):
         if isinstance(exc, py7zr.exceptions.PasswordRequired):
             return PasswordRequired("This archive is password protected")
         if isinstance(exc, UnsupportedCompressionMethodError):
-            return UnsupportedFormat(f"{what} uses an unsupported compression method")
+            return _unsupported_method(self.path.name, exc)
         if isinstance(exc, OSError) and exc.errno is not None:
             return translate_oserror(exc, f"cannot read {what}")
         if self._password and self._encrypted() and not key_proven:
@@ -426,6 +440,8 @@ class SevenZipReader(ArchiveReader):
             error = self._translate(exc, name, key_proven=proven[0])
             if isinstance(error, WrongPassword | PasswordRequired | IOFailure):
                 raise error from exc
+            if isinstance(error, UnsupportedFormat):
+                name = None  # the stream that was open is not necessarily the one that failed
             return [Issue("error", error.code, name, error.message)]
         return []
 
@@ -460,6 +476,19 @@ class SevenZipReader(ArchiveReader):
         finally:
             if fh is not None:
                 fh.close()
+
+
+def _unsupported_method(archive: str, exc: UnsupportedCompressionMethodError) -> UnsupportedFormat:
+    """Name the method py7zr could not handle, so the user knows what to look for."""
+    method = exc.args[0] if exc.args else None
+    if isinstance(method, bytes | bytearray) and method:
+        name = _METHOD_NAMES.get(bytes(method), f"method 0x{bytes(method).hex().upper()}")
+    else:
+        name = "an unknown"
+    return UnsupportedFormat(
+        f"{archive!r} uses {name} compression, which Zipwise cannot read yet",
+        hint="Extract it with 7-Zip instead.",
+    )
 
 
 def _with_target(entry: ArchiveEntry, target: str) -> ArchiveEntry:

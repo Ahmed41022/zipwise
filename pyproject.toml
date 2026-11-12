@@ -33,7 +33,9 @@ gui = [
     "PySide6>=6.6,<6.12; python_version < '3.12'",
     "PySide6>=6.6; python_version >= '3.12'",
 ]
-dev = ["pytest", "pytest-qt", "ruff", "mypy"]
+# Needed only to open RAR archives whose file names are encrypted (rarfile asks for it).
+rar = ["cryptography"]
+dev = ["pytest", "pytest-qt", "ruff", "mypy", "cryptography"]
 
 [project.scripts]
 zipwise = "zipwise.cli.main:main"
@@ -77,4 +79,6 @@ markers = [
     "gui: tests that need PySide6 and an offscreen Qt platform",
     "needs_symlink: tests that need permission to create symlinks",
     "needs_unrar: tests that need an external unrar-compatible tool",
+    "needs_7zip: interop tests that need the real 7-Zip (7z, 7zz or 7za)",
+    "needs_rar: interop tests that need the rar program, to create RAR archives (local only)",
 ]

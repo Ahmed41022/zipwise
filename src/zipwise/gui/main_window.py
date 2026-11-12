@@ -44,6 +44,7 @@ from ..jobs import JobContext
 from ..model import ArchiveEntry, ArchiveInfo, ConflictAction, CreateOptions, OperationReport
 from ..ops import archive_info, create_archive, extract_archive, list_archive, test_archive
 from ..settings import Settings, load_settings, save_settings
+from ..split import existing_set
 from .conflict_dialog import ConflictDialog
 from .create_dialog import CreateDialog
 from .entry_model import (
@@ -713,7 +714,9 @@ class MainWindow(QMainWindow):
         self.create_with(dialog.sources(), dialog.destination(), dialog.options())
 
     def create_with(self, sources: list[Path], dest: Path, options: CreateOptions) -> None:
-        if dest.exists() and not self._confirm(
+        # An older split set under this name (name.zip.001 …) is replaced too, so ask for it.
+        replaces = dest.exists() or existing_set(dest) is not None
+        if replaces and not self._confirm(
             tr("create.overwrite_title"), tr("create.overwrite_message", path=str(dest))
         ):
             return
